@@ -1,0 +1,24 @@
+# EDBP Build Directories
+cache/
+chroot/
+binary/
+.build/
+
+# ISO Artifacts & Logs
+*.iso
+*.sha256
+*.log
+build.log
+
+# Secret Keys & Credentials (CRITICAL)
+secrets/
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# OS generated files
+.DS_Store
+Thumbs.db

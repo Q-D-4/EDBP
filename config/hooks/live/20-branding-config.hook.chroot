@@ -1,0 +1,80 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+echo "[EDBP] Applying Desktop Branding Configuration"
+
+################################
+# EDBP Release Information
+################################
+mkdir -p /etc/edbp
+
+# قراءة رقم الإصدار؛ سيعتمد على الملف الذي سيتم نقله في مرحلة make prepare
+EDBP_VERSION="$(cat /etc/edbp/VERSION 2>/dev/null || echo "UNKNOWN")"
+
+cat > /etc/edbp-release <<EOF
+EDBP Enterprise Desktop
+Version: ${EDBP_VERSION}
+Build Date: $(date -I)
+Distribution: Debian 13 Trixie
+Architecture: amd64
+EOF
+
+################################
+# LibreOffice Arabic RTL Setup
+################################
+mkdir -p /etc/skel/.config/libreoffice/4/user
+
+cat > /etc/skel/.config/libreoffice/4/user/registrymodifications.xcu <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry">
+<item oor:path="/org.openoffice.Office.Common/I18N">
+ <prop oor:name="CTL">
+  <value>true</value>
+ </prop>
+</item>
+<item oor:path="/org.openoffice.Office.Writer/Settings">
+ <prop oor:name="DefaultTextDirection">
+  <value>1</value>
+ </prop>
+</item>
+<item oor:path="/org.openoffice.Office.Common/Misc">
+ <prop oor:name="UseTabbedUI">
+  <value>true</value>
+ </prop>
+</item>
+</oor:items>
+EOF
+
+################################
+# KDE Default Configuration
+################################
+mkdir -p /etc/skel/.config
+
+cat > /etc/skel/.config/kdeglobals <<EOF
+[KDE]
+SingleClick=false
+
+[General]
+TerminalApplication=konsole
+EOF
+
+################################
+# SDDM Configuration
+################################
+mkdir -p /etc/sddm.conf.d
+
+cat > /etc/sddm.conf.d/branding.conf <<EOF
+[Theme]
+Current=breeze
+
+[Autologin]
+Relogin=false
+EOF
+
+################################
+# Enable Services
+################################
+systemctl enable sddm
+systemctl enable cups
+systemctl enable avahi-daemon

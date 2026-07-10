@@ -1,0 +1,49 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+echo "[EDBP] Installing Enterprise Applications"
+
+################################
+# Keyrings Directory
+################################
+install -m 0755 -d /usr/share/keyrings
+
+################################
+# Brave Browser
+################################
+curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+
+cat > /etc/apt/sources.list.d/brave-browser-release.sources <<EOF
+Types: deb
+URIs: https://brave-browser-apt-release.s3.brave.com/
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/brave-browser-archive-keyring.gpg
+EOF
+
+################################
+# Element Desktop
+################################
+curl -fsSL https://packages.element.io/debian/element-io-archive-keyring.gpg \
+-o /usr/share/keyrings/element-io-archive-keyring.gpg
+
+cat > /etc/apt/sources.list.d/element.sources <<EOF
+Types: deb
+URIs: https://packages.element.io/debian/
+Suites: default
+Components: main
+Signed-By: /usr/share/keyrings/element-io-archive-keyring.gpg
+EOF
+
+################################
+# Install Packages
+################################
+apt-get update
+
+apt-get install -y brave-browser element-desktop
+
+apt-get clean

@@ -1,0 +1,75 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+echo "[EDBP] Applying Security Policies"
+
+################################
+# SSH Hardening (drop-in)
+################################
+mkdir -p /etc/ssh/sshd_config.d
+
+cat > /etc/ssh/sshd_config.d/99-edbp-hardening.conf <<EOF
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+X11Forwarding no
+AllowUsers localadmin
+EOF
+
+chmod 600 /etc/ssh/sshd_config.d/99-edbp-hardening.conf
+
+
+################################
+# USBGuard Baseline Policy
+################################
+mkdir -p /etc/usbguard
+
+cat > /etc/usbguard/rules.conf <<EOF
+allow with-interface 03:*:*
+EOF
+
+cat > /etc/usbguard/usbguard-daemon.conf <<EOF
+IPCAllowedUsers=localadmin
+IPCAllowedGroups=sudo
+ImplicitPolicyTarget=block
+RuleFile=/etc/usbguard/rules.conf
+EOF
+
+chmod 600 /etc/usbguard/rules.conf /etc/usbguard/usbguard-daemon.conf
+
+systemctl enable usbguard
+
+################################
+# nftables Firewall
+################################
+cat > /etc/nftables.conf <<EOF
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority filter;
+        policy drop;
+        iif lo accept
+        ct state established,related accept
+        tcp dport 22 accept
+    }
+    chain output {
+        type filter hook output priority filter;
+        policy drop;
+        oif lo accept
+        ct state established,related accept
+        udp dport {53,123} accept
+        tcp dport {53,80,443} accept
+    }
+    chain forward {
+        type filter hook forward priority filter;
+        policy drop;
+    }
+}
+EOF
+
+systemctl enable nftables
