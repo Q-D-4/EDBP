@@ -840,7 +840,20 @@ TerminalApplication=konsole
 
 EOF
 
+################################
+# KDE Plasma Default Wallpaper Layout
+################################
 
+mkdir -p /etc/skel/.local/share/plasma/look-and-feel/EDBPTheme/contents/layouts/
+
+cat > /etc/skel/.local/share/plasma/look-and-feel/EDBPTheme/contents/layouts/org.kde.plasma.desktop-layout.js <<EOF
+var desktopsArray = desktopsForActivity(currentActivity());
+for (var j = 0; j < desktopsArray.length; j++) {
+    desktopsArray[j].wallpaperPlugin = "org.kde.image";
+    desktopsArray[j].currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
+    desktopsArray[j].writeConfig("Image", "file:///usr/share/wallpapers/EDBPTheme/contents/images/default_wallpaper.png");
+}
+EOF
 
 ################################
 # SDDM Configuration
@@ -989,77 +1002,49 @@ systemctl enable usbguard
 
 
 ################################
-# nftables Firewall
+# nftables Firewall (LAN-Only / Air-Gapped Policy)
 ################################
 
-
-cat > /etc/nftables.conf <<EOF
-
+cat > /etc/nftables.conf <<'EOF'
 #!/usr/sbin/nft -f
-
 
 flush ruleset
 
-
-
 table inet filter {
+    # Define a reusable set containing all private LAN spaces
+    set local_ranges {
+        type ipv4_addr
+        flags interval
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }
+    }
 
+    chain input {
+        type filter hook input priority filter; policy drop;
 
-chain input {
+        # Allow localhost and connection states
+        iif "lo" accept
+        ct state established,related accept
 
-type filter hook input priority filter;
+        # Allow incoming from any LAN range
+        ip saddr @local_ranges accept
+    }
 
-policy drop;
+    chain output {
+        type filter hook output priority filter; policy drop;
 
+        # Allow localhost and connection states
+        oif "lo" accept
+        ct state established,related accept
 
-iif lo accept
+        # Allow outgoing to any LAN range
+        ip daddr @local_ranges accept
+    }
 
-
-ct state established,related accept
-
-
-tcp dport 22 accept
-
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
 }
-
-
-
-chain output {
-
-type filter hook output priority filter;
-
-policy drop;
-
-
-oif lo accept
-
-
-ct state established,related accept
-
-
-udp dport {53,123} accept
-
-
-tcp dport {53,80,443} accept
-
-}
-
-
-
-chain forward {
-
-type filter hook forward priority filter;
-
-policy drop;
-
-}
-
-
-}
-
 EOF
-
-
 
 systemctl enable nftables
 ```
