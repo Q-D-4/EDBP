@@ -1,1 +1,106 @@
+#!/bin/sh
 
+set -eu
+
+# Resolve project files independently of the caller's current directory.
+PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION_FILE="${PROJECT_ROOT}/VERSION"
+
+if [ ! -r "${VERSION_FILE}" ]; then
+    printf '%s\n' "ERROR: missing readable VERSION file: ${VERSION_FILE}" >&2
+    exit 1
+fi
+
+EDBP_VERSION=$(sed -n '1{s/[[:space:]]*$//;p;}' "${VERSION_FILE}")
+
+case "${EDBP_VERSION}" in
+    ''|*[!A-Za-z0-9._-]*)
+        printf '%s\n' \
+            "ERROR: VERSION must contain only letters, digits, dot, underscore, or hyphen." >&2
+        exit 1
+        ;;
+esac
+
+ISO_VOLUME="EDBP_${EDBP_VERSION}"
+if [ "${#ISO_VOLUME}" -gt 32 ]; then
+    printf '%s\n' "ERROR: ISO volume label exceeds the 32-byte ISO9660 limit." >&2
+    exit 1
+fi
+
+# These defaults can be overridden without editing the repository. This keeps
+# the same configuration usable with an internal mirror/proxy in the future.
+EDBP_BUILD_MIRROR=${EDBP_BUILD_MIRROR:-https://deb.debian.org/debian/}
+EDBP_BUILD_SECURITY_MIRROR=${EDBP_BUILD_SECURITY_MIRROR:-https://security.debian.org/debian-security/}
+EDBP_RUNTIME_MIRROR=${EDBP_RUNTIME_MIRROR:-https://deb.debian.org/debian/}
+EDBP_RUNTIME_SECURITY_MIRROR=${EDBP_RUNTIME_SECURITY_MIRROR:-https://security.debian.org/debian-security/}
+EDBP_ISO_PUBLISHER=${EDBP_ISO_PUBLISHER:-EDBP Enterprise IT}
+
+validate_mirror_url() {
+    mirror_name=$1
+    mirror_url=$2
+
+    case "${mirror_url}" in
+        http://*|https://*)
+            ;;
+        *)
+            printf '%s\n' \
+                "ERROR: ${mirror_name} must be an http:// or https:// URL." >&2
+            exit 1
+            ;;
+    esac
+}
+
+validate_mirror_url EDBP_BUILD_MIRROR "${EDBP_BUILD_MIRROR}"
+validate_mirror_url EDBP_BUILD_SECURITY_MIRROR "${EDBP_BUILD_SECURITY_MIRROR}"
+validate_mirror_url EDBP_RUNTIME_MIRROR "${EDBP_RUNTIME_MIRROR}"
+validate_mirror_url EDBP_RUNTIME_SECURITY_MIRROR "${EDBP_RUNTIME_SECURITY_MIRROR}"
+
+# noauto prevents lb from recursively invoking this script. The caller's
+# arguments are appended last so CI or an operator can make an explicit,
+# one-build override without weakening the repository defaults silently.
+lb config noauto \
+    --ignore-system-defaults \
+    --mode debian \
+    --distribution trixie \
+    --architecture amd64 \
+    --binary-image iso-hybrid \
+    --bootloaders grub-efi \
+    --uefi-secure-boot auto \
+    --system live \
+    --initramfs live-boot \
+    --initsystem systemd \
+    --debian-installer live \
+    --debian-installer-distribution trixie \
+    --debian-installer-gui true \
+    --archive-areas "main non-free-firmware" \
+    --firmware-binary true \
+    --firmware-chroot true \
+    --security true \
+    --updates true \
+    --backports false \
+    --apt-secure true \
+    --apt-recommends true \
+    --apt-source-archives false \
+    --mirror-bootstrap "${EDBP_BUILD_MIRROR}" \
+    --mirror-chroot "${EDBP_BUILD_MIRROR}" \
+    --mirror-chroot-security "${EDBP_BUILD_SECURITY_MIRROR}" \
+    --mirror-debian-installer "${EDBP_BUILD_MIRROR}" \
+    --mirror-binary "${EDBP_RUNTIME_MIRROR}" \
+    --mirror-binary-security "${EDBP_RUNTIME_SECURITY_MIRROR}" \
+    --linux-flavours amd64 \
+    --linux-packages linux-image \
+    --chroot-filesystem squashfs \
+    --chroot-squashfs-compression-type xz \
+    --checksums sha256 \
+    --image-name "edbp-${EDBP_VERSION}" \
+    --iso-application "EDBP Enterprise Desktop" \
+    --iso-publisher "${EDBP_ISO_PUBLISHER}" \
+    --iso-volume "${ISO_VOLUME}" \
+    --bootappend-live "boot=live components quiet splash locales=en_US.UTF-8 keyboard-layouts=us,ara keyboard-options=grp:alt_shift_toggle module_blacklist=bluetooth,btusb" \
+    --bootappend-install "locale=en_US.UTF-8 keymap=us module_blacklist=bluetooth,btusb" \
+    --memtest none \
+    --loadlin false \
+    --win32-loader false \
+    --net-tarball false \
+    --utc-time true \
+    "${@}"
