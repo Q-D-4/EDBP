@@ -1,0 +1,22 @@
+# LibreOffice components required by the workstation role.
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-math
+libreoffice-l10n-ar
+libreoffice-kf6
+libreoffice-plasma
+libreoffice-style-breeze
+hunspell-ar
+mythes-ar
+
+# Arabic/Latin and Microsoft-metric-compatible fonts. fonts-noto-extra is
+# intentionally excluded (roughly 326 MiB installed and not required here).
+fonts-noto-core
+fonts-noto-color-emoji
+fonts-liberation
+fonts-liberation-sans-narrow
+fonts-croscore
+fonts-crosextra-caladea
+fonts-crosextra-carlito
+fonts-sil-scheherazade

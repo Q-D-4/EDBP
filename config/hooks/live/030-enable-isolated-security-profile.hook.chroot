@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -eu
+
+# Debian installs nftables.service disabled by default. EDBP's default profile
+# is Isolated, so an installed rules file without this enablement is a security
+# failure, not merely an incomplete configuration.
+systemctl enable nftables.service
+systemctl enable usbguard.service

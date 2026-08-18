@@ -1,0 +1,1 @@
+deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.chroot.gpg] https://packages.element.io/debian/ default main

@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+# Debian's usbguard postinst creates a plugdev ACL on first installation. That
+# is broader than EDBP's localadmin/sudo policy and would remain effective even
+# though IPCAllowedGroups is not configured.
+legacy_acl=/etc/usbguard/IPCAccessControl.d/:plugdev
+if [ -f "${legacy_acl}" ]; then
+    rm -f -- "${legacy_acl}"
+elif [ -e "${legacy_acl}" ] || [ -L "${legacy_acl}" ]; then
+    printf '%s\n' \
+        "ERROR: refusing to remove unexpected USBGuard plugdev ACL object" >&2
+    exit 1
+fi
+
+# The CLI talks directly to usbguard.service. The additional D-Bus bridge is
+# not required and ships a broader plugdev Polkit rule, so keep it disabled.
+systemctl disable usbguard-dbus.service
+
+chmod 0600 \
+    /etc/usbguard/rules.conf \
+    /etc/usbguard/usbguard-daemon.conf \
+    /etc/usbguard/IPCAccessControl.d/:sudo

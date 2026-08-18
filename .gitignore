@@ -12,6 +12,12 @@ config/chroot
 config/common
 config/source
 
+# Files/symlinks materialized by lb config from the installed live-build release
+config/hooks/normal/
+config/hooks/live/0010-disable-kexec-tools.hook.chroot
+config/hooks/live/0050-disable-sysvinit-tmpfs.hook.chroot
+config/package-lists/live.list.chroot
+
 # ISO Artifacts & Logs
 *.iso
 *.sha256

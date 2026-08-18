@@ -1,0 +1,3 @@
+# Preserve the cybersecurity-approved nftables artifact byte-for-byte. Its
+# approved hash includes the existing final blank line.
+config/includes.chroot_after_packages/etc/nftables.conf -text whitespace=-blank-at-eof

@@ -1,0 +1,1 @@
+deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.chroot.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main

@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set -eu
+
+# brave-keyring is a hard dependency of brave-browser. During package install,
+# only the build-time brave-browser.list source exists, so its postinst creates
+# a globally trusted compatibility symlink. The final image uses the vendor's
+# recognized brave-browser-release.list name, but that source is installed only
+# during live-build's binary pass. Remove the initial symlink, while failing
+# closed if the vendor changes it into an unexpected object. Later keyring
+# upgrades will see the recognized final source and keep global trust removed.
+legacy_trust=/etc/apt/trusted.gpg.d/brave-browser-release.gpg
+expected_target=/usr/share/keyrings/brave-browser-archive-keyring.gpg
+
+if [ -L "${legacy_trust}" ]; then
+    actual_target=$(readlink "${legacy_trust}")
+    if [ "${actual_target}" != "${expected_target}" ]; then
+        printf '%s\n' \
+            "ERROR: unexpected Brave trust symlink target: ${actual_target}" >&2
+        exit 1
+    fi
+    rm -f -- "${legacy_trust}"
+elif [ -e "${legacy_trust}" ]; then
+    printf '%s\n' \
+        "ERROR: refusing to remove unexpected Brave global trust object" >&2
+    exit 1
+fi

@@ -1,0 +1,10 @@
+# Kept separate from productivity: these packages have different trust and
+# update ownership. Brave and Element come from pinned vendor repositories.
+brave-browser
+element-desktop
+element-io-archive-keyring
+
+# The minimal Debian build removes networking, SSH-agent, browser-integration,
+# and Secret Service features that are not part of the stated requirement.
+keepassxc-minimal
+fonts-font-awesome

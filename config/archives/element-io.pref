@@ -1,0 +1,8 @@
+# Fail closed: nightly and web builds are deliberately not eligible.
+Package: element-desktop element-io-archive-keyring
+Pin: release o=riot.im
+Pin-Priority: 500
+
+Package: *
+Pin: release o=riot.im
+Pin-Priority: -1

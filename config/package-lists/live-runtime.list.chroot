@@ -1,0 +1,6 @@
+# live-build generates the core live-boot/live-config list automatically.
+# These operational recommendations are required because APT Recommends are
+# disabled globally.
+user-setup
+locales
+keyboard-configuration
