@@ -26,10 +26,20 @@ for command_name in \
     python3 \
     sha256sum \
     shellcheck \
-    ssh-keygen \
-    visudo; do
+    ssh-keygen; do
     require_command "${command_name}"
 done
+
+# Debian installs visudo in /usr/sbin.  Normal unprivileged login shells may
+# legitimately omit sbin directories from PATH, so resolve the canonical path
+# explicitly instead of requiring operators to mutate their environment.
+if command -v visudo >/dev/null 2>&1; then
+    visudo_command=$(command -v visudo)
+elif [[ -x /usr/sbin/visudo ]]; then
+    visudo_command=/usr/sbin/visudo
+else
+    fail 'required build-host command is missing: /usr/sbin/visudo (package: sudo)'
+fi
 
 version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
@@ -37,12 +47,17 @@ version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
 
 if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
     && [[ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]]; then
-    fail 'tracked source tree is dirty; commit reviewed changes before a production build'
+    fail 'source tree is dirty (tracked or untracked); commit reviewed changes and remove build debris before a production build'
 fi
 
 sh -n auto/config
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
+
+grep -Fqx \
+    'systemd-analyze verify --man=no edbp-oobe.service sddm.service' \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'desktop hook must suppress only unavailable manpage checks during unit verification'
 
 while IFS= read -r script; do
     sh -n "${script}"
@@ -174,12 +189,21 @@ grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
     "${rendered_preseed}" \
     || fail 'installer finalization command is missing'
 
-visudo --check --file \
+"${visudo_command}" --check --file \
     config/includes.chroot_after_packages/etc/sudoers.d/localadmin >/dev/null
 
-jq --exit-status . \
-    config/includes.chroot_after_packages/etc/brave/policies/managed/policies.json \
-    >/dev/null
+for json_file in \
+    config/includes.chroot_after_packages/etc/brave-origin/policies/managed/policies.json \
+    config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/metadata.json; do
+    jq --exit-status . "${json_file}" >/dev/null
+done
+
+grep -Fqx 'defaultWallpaperTheme=EDBP' \
+    config/includes.chroot_after_packages/etc/xdg/plasmarc \
+    || fail 'Plasma default wallpaper package is not EDBP'
+grep -Fqx 'defaultFileSuffix=.jpg' \
+    config/includes.chroot_after_packages/etc/xdg/plasmarc \
+    || fail 'Plasma wallpaper suffix is not pinned to JPEG'
 
 grep -Fqx \
     'Dir::Etc::Trusted "/usr/share/keyrings/debian-archive-keyring.gpg";' \
@@ -198,6 +222,23 @@ for source_list in config/archives/*.list.chroot config/archives/*.list.binary; 
     fi
 done
 
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser.list.chroot \
+    || fail 'Brave build source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser-release.list.binary \
+    || fail 'Brave installed source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.chroot \
+    || fail 'Element build source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.binary \
+    || fail 'Element installed source does not reference the shared live-build key'
+
 python3 - <<'PY'
 import pathlib
 import xml.etree.ElementTree as ET
@@ -213,16 +254,40 @@ PY
 
 printf '%s  %s\n' \
     c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788 \
-    config/archives/brave-browser.key.chroot \
+    config/archives/brave-browser.key \
     | sha256sum --check --strict >/dev/null
 printf '%s  %s\n' \
     c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
-    config/archives/element-io.key.chroot \
+    config/archives/element-io.key \
     | sha256sum --check --strict >/dev/null
 printf '%s  %s\n' \
     04f5ff6be56fe60acd6b7ee031832b41e8671ae09c42ba141b91da04f0e0114a \
     config/includes.chroot_after_packages/etc/nftables.conf \
     | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    7c50dbc995c667b7fba7014801598dca23dd281efa80e5f8e4c89e10bf49f84b \
+    config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/contents/images/1920x1080.jpg \
+    | sha256sum --check --strict >/dev/null
+
+grep -Fqx 'brave-origin' config/package-lists/applications.list.chroot \
+    || fail 'Brave Origin package is missing'
+grep -Fqx 'Package: brave-origin brave-keyring' \
+    config/archives/brave-browser.pref \
+    || fail 'Brave repository pin does not restrict eligibility to Origin and its keyring'
+if grep -Fqx 'brave-browser' config/package-lists/applications.list.chroot; then
+    fail 'legacy full Brave package remains in the application list'
+fi
+
+grep -Fqx 'block with-interface one-of { 08:*:* }' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf \
+    || fail 'explicit USB Mass Storage block rule is missing'
+grep -Fqx 'allow with-interface match-all { 03:*:* 06:*:* 07:*:* }' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf \
+    || fail 'USBGuard approved-class allowlist is missing'
+if grep -Eq '^[[:space:]]*allow[[:space:]]*$' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf; then
+    fail 'unconditional USBGuard allow rule is forbidden'
+fi
 
 if git grep -nE \
     'BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED|PRIVATE) PRIVATE KEY' -- .; then

@@ -25,6 +25,8 @@ config/package-lists/live.list.chroot
 *.packages
 *.zsync
 binary.modified_timestamps
+chroot.packages.install
+chroot.packages.live
 *.log
 build.log
 SHA256SUMS
@@ -37,6 +39,8 @@ config/includes.installer/localadmin_authorized_keys
 config/includes.installer/preseed.cfg
 *.pem
 *.key
+!config/archives/brave-browser.key
+!config/archives/element-io.key
 id_rsa
 id_rsa.*
 id_ed25519

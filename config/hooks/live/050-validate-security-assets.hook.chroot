@@ -25,6 +25,23 @@ check_sha256 \
 check_sha256 \
     04f5ff6be56fe60acd6b7ee031832b41e8671ae09c42ba141b91da04f0e0114a \
     /etc/nftables.conf
+check_sha256 \
+    7c50dbc995c667b7fba7014801598dca23dd281efa80e5f8e4c89e10bf49f84b \
+    /usr/share/wallpapers/EDBP/contents/images/1920x1080.jpg
+
+[ ! -e /etc/apt/sources.list.d/brave-origin.sources ] \
+    || { printf '%s\n' 'ERROR: unapproved Brave Origin source survived cleanup' >&2; exit 1; }
+[ ! -e /usr/share/keyrings/brave-origin.gpg ] \
+    || { printf '%s\n' 'ERROR: unapproved Brave Origin key survived cleanup' >&2; exit 1; }
+
+dpkg-query -W -f='${Status}\n' brave-origin 2>/dev/null \
+    | grep -qx 'install ok installed' \
+    || { printf '%s\n' 'ERROR: Brave Origin is not installed' >&2; exit 1; }
+if dpkg-query -W -f='${Status}\n' brave-browser 2>/dev/null \
+    | grep -qx 'install ok installed'; then
+    printf '%s\n' 'ERROR: legacy full Brave package is installed' >&2
+    exit 1
+fi
 
 trusted_keyring=$(apt-config shell value Dir::Etc::Trusted | sed -n "s/^value='\(.*\)'$/\1/p")
 trusted_parts=$(apt-config shell value Dir::Etc::TrustedParts | sed -n "s/^value='\(.*\)'$/\1/p")
@@ -35,7 +52,7 @@ trusted_parts=$(apt-config shell value Dir::Etc::TrustedParts | sed -n "s/^value
 
 /usr/sbin/nft --check --file /etc/nftables.conf
 /usr/bin/usbguard-rule-parser --file /etc/usbguard/rules.conf >/dev/null
-visudo --check --file /etc/sudoers.d/localadmin
+/usr/sbin/visudo --check --file /etc/sudoers.d/localadmin
 
 for forbidden_package in \
     bluez \

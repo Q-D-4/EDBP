@@ -14,7 +14,10 @@ chown root:root \
     /etc/systemd/system/edbp-oobe.service \
     /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
     /etc/sddm.conf.d/hide-admin.conf \
-    /etc/brave/policies/managed/policies.json \
+    /etc/brave-origin/policies/managed/policies.json \
+    /etc/xdg/plasmarc \
+    /usr/share/wallpapers/EDBP/metadata.json \
+    /usr/share/wallpapers/EDBP/contents/images/1920x1080.jpg \
     "${lo_policy}" \
     /etc/xdg/baloofilerc \
     /etc/xdg/kxkbrc \
@@ -30,7 +33,10 @@ chmod 0644 \
     /etc/systemd/system/edbp-oobe.service \
     /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
     /etc/sddm.conf.d/hide-admin.conf \
-    /etc/brave/policies/managed/policies.json \
+    /etc/brave-origin/policies/managed/policies.json \
+    /etc/xdg/plasmarc \
+    /usr/share/wallpapers/EDBP/metadata.json \
+    /usr/share/wallpapers/EDBP/contents/images/1920x1080.jpg \
     "${lo_policy}" \
     /etc/xdg/baloofilerc \
     /etc/xdg/kxkbrc \
@@ -40,9 +46,11 @@ chmod 0644 \
     /etc/default/keyboard \
     /etc/locale.gen
 
-visudo --check --file "${sudoers_file}"
+/usr/sbin/visudo --check --file "${sudoers_file}"
 bash -n "${oobe_script}"
-systemd-analyze verify edbp-oobe.service sddm.service
+# Keep structural/dependency verification while intentionally skipping
+# Documentation=man: lookups.  The production image omits man-db/manpages.
+systemd-analyze verify --man=no edbp-oobe.service sddm.service
 grep -Fqx "Indexing-Enabled[\$i]=false" /etc/xdg/baloofilerc \
     || { printf '%s\n' 'ERROR: Baloo indexing policy is missing' >&2; exit 1; }
 
@@ -51,7 +59,7 @@ import json
 import pathlib
 import xml.etree.ElementTree as ET
 
-json_path = pathlib.Path('/etc/brave/policies/managed/policies.json')
+json_path = pathlib.Path('/etc/brave-origin/policies/managed/policies.json')
 xml_path = pathlib.Path('/etc/libreoffice/registry/edbp-defaults.xcd')
 
 with json_path.open(encoding='utf-8') as stream:

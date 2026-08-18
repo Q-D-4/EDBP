@@ -141,10 +141,10 @@ EDBP/
 │   ├── archives/
 │   │   ├── 00-edbp-trust-scope.conf
 │   │   ├── brave-browser-release.list.binary
-│   │   ├── brave-browser.key.chroot
+│   │   ├── brave-browser.key
 │   │   ├── brave-browser.list.chroot
 │   │   ├── brave-browser.pref
-│   │   ├── element-io.key.chroot
+│   │   ├── element-io.key
 │   │   ├── element-io.list.binary
 │   │   ├── element-io.list.chroot
 │   │   └── element-io.pref
@@ -162,7 +162,7 @@ EDBP/
 │   │   └── preseed.cfg.in
 │   ├── includes.chroot_after_packages/
 │   │   ├── etc/
-│   │   │   ├── brave/policies/managed/policies.json
+│   │   │   ├── brave-origin/policies/managed/policies.json
 │   │   │   ├── default/keyboard
 │   │   │   ├── libreoffice/registry/edbp-defaults.xcd
 │   │   │   ├── locale.conf
@@ -185,12 +185,17 @@ EDBP/
 │   │   │       ├── baloofilerc
 │   │   │       ├── kxkbrc
 │   │   │       ├── mimeapps.list
+│   │   │       ├── plasmarc
 │   │   │       └── plasma-localerc
 │   │   └── usr/
 │   │       ├── local/sbin/edbp-oobe
-│   │       └── share/keyrings/
-│   │           ├── brave-browser-archive-keyring.gpg
-│   │           └── element-io-archive-keyring.gpg
+│   │       └── share/
+│   │           ├── keyrings/
+│   │           │   ├── brave-browser-archive-keyring.gpg
+│   │           │   └── element-io-archive-keyring.gpg
+│   │           └── wallpapers/EDBP/
+│   │               ├── metadata.json
+│   │               └── contents/images/1920x1080.jpg
 │   └── package-lists/
 │       ├── applications.list.chroot
 │       ├── desktop.list.chroot
@@ -265,16 +270,23 @@ This supports a future local APT mirror without changing tracked source.
 | Repository | Build source | Installed source | Eligible packages |
 |---|---|---|---|
 | Debian | `auto/config` mirrors | generated Debian sources | Debian archive packages |
-| Brave | `brave-browser.list.chroot` | `brave-browser-release.list.binary` | `brave-browser`, `brave-keyring` |
+| Brave | `brave-browser.list.chroot` | `brave-browser-release.list.binary` | `brave-origin`, `brave-keyring` |
 | Element | `element-io.list.chroot` | `element-io.list.binary` | `element-desktop`, `element-io-archive-keyring` |
 
-Every vendor source uses `Signed-By`. Although live-build stages
-`*.key.chroot` under `trusted.gpg.d`, `00-edbp-trust-scope.conf` excludes that
-directory from global trust: only Debian's archive keyring and administrator
-keyrings under `/etc/apt/keyrings` are globally eligible. Vendor keys remain
-usable solely through their explicit source paths. Pin files first allow only
-the reviewed package names at priority 500 and then assign priority `-1` to
-every other package from that origin. Nightly/beta packages are not eligible.
+Every vendor source uses `Signed-By`. `live-build` uses two distinct archive
+passes and can temporarily expose the chroot and binary source entries in the
+same APT invocation. Each repository therefore has one unsuffixed `*.key`
+input shared by both passes, and both source entries reference the same
+generated path under `trusted.gpg.d`. Stage-suffixed duplicate keys are
+forbidden because they produce different `Signed-By` values for the same
+URI/suite and APT rejects the source set as ambiguous.
+
+`00-edbp-trust-scope.conf` excludes `trusted.gpg.d` from global trust: only
+Debian's archive keyring and administrator keyrings under `/etc/apt/keyrings`
+are globally eligible. Vendor keys remain usable solely through their explicit
+source paths. Pin files first allow only the reviewed package names at priority
+500 and then assign priority `-1` to every other package from that origin.
+Nightly/beta packages are not eligible.
 
 ### 6.2 Keyring checksums
 
@@ -283,9 +295,14 @@ every other package from that origin. Nightly/beta packages are not eligible.
 | Brave | `DBF1 A116 C220 B8C7 164F 9823 0686 B784 2003 8257` | `c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788` |
 | Element | `12D4 CD60 0C22 40A9 F4A8 2071 D7B0 B669 41D0 1538` | `c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955` |
 
-The Brave package may create a compatibility symlink in global APT trust.
-Hook `020` accepts only the reviewed target and removes it; an unexpected file
-or target aborts the build. Hook `050` verifies final scoped keyring bytes.
+`brave-keyring` may create a compatibility symlink in global APT trust. In
+addition, the reviewed Brave Origin 1.93 package currently generates a second
+Deb822 source for Google's Chrome repository and an associated key under
+`/usr/share/keyrings`. Neither object belongs to the EDBP trust model. Hook
+`020` accepts only the reviewed shapes, removes them, and aborts on drift. The
+tracked Brave repository remains the sole update path. Hook `050` verifies the
+final scoped keyring bytes and confirms that the additional Origin source and
+key did not survive.
 
 Direct rolling vendor repositories are not reproducible across dates. A fleet
 release SHOULD use a snapshot or controlled internal mirror and retain the
@@ -328,7 +345,7 @@ not justified by the English/Arabic role.
 
 | Application | Package and rationale |
 |---|---|
-| Brave | `brave-browser`; vendor-owned update boundary |
+| Brave Origin | `brave-origin`; official standalone minimal Linux build, updated only through the pinned Brave repository |
 | Element | `element-desktop`; no homeserver/account preconfiguration |
 | KeePassXC | `keepassxc-minimal`; browser integration, SSH agent, networking, and Secret Service features excluded |
 | Icons | `fonts-font-awesome`; explicit KeePassXC UI dependency |
@@ -391,10 +408,13 @@ approved exception.
 ### 9.1 Class rule
 
 ```text
+block with-interface one-of { 08:*:* }
 allow with-interface match-all { 03:*:* 06:*:* 07:*:* }
 ```
 
-The complete interface set of a device must be a subset of:
+The first rule explicitly blocks any device exposing a Mass Storage interface
+(`08`), including composite devices. The second rule requires the complete
+interface set of every allowed device to be a subset of:
 
 | Class | Meaning |
 |---|---|
@@ -402,8 +422,11 @@ The complete interface set of a device must be a subset of:
 | `06` | Still imaging/scanner |
 | `07` | Printer |
 
-Composite HID+storage and printer+storage devices do not match. All other
-devices inherit `ImplicitPolicyTarget=block`.
+An unconditional `allow` rule is forbidden: it would permit every non-storage
+USB class and convert the policy from an allowlist into a broad blocklist. All
+unmatched devices inherit `ImplicitPolicyTarget=block`. The rules are embedded
+in the image and loaded when `usbguard.service` starts; they are not appended
+after boot, which avoids an unenforced race window.
 
 ### 9.2 Daemon behavior
 
@@ -738,6 +761,12 @@ keys in each installed target.
 Hooks use `set -eu` and are executable. They must fail closed instead of
 silently repairing an unreviewed object.
 
+Hook `040` invokes `systemd-analyze verify --man=no`: dependency, executable,
+unit, and drop-in validation remain active, while only `Documentation=man:`
+existence checks are skipped. The minimal image intentionally omits manpages,
+so treating absent SDDM documentation as a service failure would be a false
+positive and installing `man-db` solely to satisfy that check would be bloat.
+
 ---
 
 ## 16. Service policy
@@ -788,8 +817,7 @@ ssh-keygen -t ed25519 -a 100 -f secrets/edbp_admin -C edbp-admin
 install -m 0600 secrets/edbp_admin.pub secrets/localadmin_authorized_keys
 
 # Prompts on the terminal; plaintext is not placed in argv or shell history.
-umask 077
-mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+( umask 077; mkpasswd --method=yescrypt > secrets/localadmin_password_hash )
 chmod 0600 secrets/localadmin_password_hash
 ```
 
@@ -849,6 +877,12 @@ policy. Neither provenance JSON file contains the password hash value.
 | `make verify-checksums` | Verify existing `SHA256SUMS` and manifest paths |
 | `make scrub-build-inputs` | Delete only generated preseed and staged authorized keys |
 | `make clean` | Purge live-build state and generated artifacts/staged inputs; preserve source secrets |
+
+`make config` and `make build` force a build-safe `umask 022`. Secret staging
+scripts independently enforce `umask 077`, and the password-generation example
+uses a subshell so a restrictive umask cannot leak into `live-build`. This keeps
+APT's `_apt` sandbox able to traverse its cache instead of falling back to an
+unsandboxed root download.
 
 Production build:
 
@@ -1072,9 +1106,12 @@ the same approved fleet management key.
    document fallback depend on additional fonts pulled by Debian. Deleting all
    non-selected font packages would break rendering and package integrity; a
    fontconfig policy requires a separate typography acceptance test.
-10. **No branding asset is fabricated.** The repository retains the packaged
-    Breeze background until an approved wallpaper/logo file, dimensions,
-    license, and checksum are supplied through change control.
+10. **The approved branding asset is immutable build input.** KDE defaults to
+    the supplied `EDBP Green` 1920x1080 JPEG through `/etc/xdg/plasmarc` and a
+    standard Plasma wallpaper package. The source SHA-256 is
+    `7c50dbc995c667b7fba7014801598dca23dd281efa80e5f8e4c89e10bf49f84b`.
+    The setting is a default for new profiles, not a lock; users may select a
+    different wallpaper. Displays above 1920x1080 will upscale this asset.
 11. **A shared fleet password has fleet-wide blast radius.** Its crypt(3) hash
     is recoverable from every distributed ISO and installed shadow database.
     Compromise or offline cracking of one value affects every machine built
