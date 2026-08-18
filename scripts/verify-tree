@@ -188,6 +188,13 @@ grep -Fqx 'd-i passwd/root-login boolean false' \
 grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
     "${rendered_preseed}" \
     || fail 'installer finalization command is missing'
+grep -Fqx 'd-i netcfg/enable boolean false' \
+    "${rendered_preseed}" \
+    || fail 'installer network configuration must be disabled for offline deployment'
+if awk '$1 == "d-i" && $2 ~ /^netcfg\// && $2 != "netcfg\/enable" { found = 1 } END { exit !found }' \
+    "${rendered_preseed}"; then
+    fail 'installer contains network questions despite the offline deployment policy'
+fi
 
 "${visudo_command}" --check --file \
     config/includes.chroot_after_packages/etc/sudoers.d/localadmin >/dev/null
@@ -277,6 +284,25 @@ grep -Fqx 'Package: brave-origin brave-keyring' \
 if grep -Fqx 'brave-browser' config/package-lists/applications.list.chroot; then
     fail 'legacy full Brave package remains in the application list'
 fi
+
+for required_runtime_package in \
+    console-setup \
+    kf6-breeze-icon-theme \
+    lsof \
+    rtkit \
+    sonnet6-plugins \
+    upower; do
+    if ! grep -R -x "${required_runtime_package}" config/package-lists >/dev/null; then
+        fail "required no-Recommends runtime package is missing: ${required_runtime_package}"
+    fi
+done
+
+grep -Fq 'hplip_autostart=/etc/xdg/autostart/hplip-systray.desktop' \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'HPLIP tray autostart policy is missing'
+grep -Fq "printf '\\nHidden=true\\n'" \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'HPLIP tray autostart disable is not enforced'
 
 grep -Fqx 'block with-interface one-of { 08:*:* }' \
     config/includes.chroot_after_packages/etc/usbguard/rules.conf \

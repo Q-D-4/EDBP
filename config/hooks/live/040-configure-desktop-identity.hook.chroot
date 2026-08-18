@@ -7,6 +7,7 @@ oobe_script=/usr/local/sbin/edbp-oobe
 lo_policy=/etc/libreoffice/registry/edbp-defaults.xcd
 lo_registry_link=/usr/lib/libreoffice/share/registry/zz-edbp-defaults.xcd
 locale_compat=/etc/default/locale
+hplip_autostart=/etc/xdg/autostart/hplip-systray.desktop
 
 chown root:root \
     "${sudoers_file}" \
@@ -170,5 +171,24 @@ fi
 
 locale-gen en_US.UTF-8 ar_SY.UTF-8
 update-locale LANG=en_US.UTF-8 LANGUAGE=en_US:en
+
+# hplip-gui is retained for explicit printer administration, but its tray
+# helper has no reason to run in every user session.  On the 4 GiB baseline it
+# reached a 125 MiB peak during Live validation and emitted Python 3.13 parser
+# warnings.  Hidden=true is the XDG Autostart mechanism for a system-wide
+# administrative disable; fail closed if the package layout changes.
+[ -f "${hplip_autostart}" ] || {
+    printf '%s\n' 'ERROR: HPLIP autostart descriptor is missing' >&2
+    exit 1
+}
+if grep -Eq '^Hidden=' "${hplip_autostart}"; then
+    sed -i 's/^Hidden=.*/Hidden=true/' "${hplip_autostart}"
+else
+    printf '\nHidden=true\n' >>"${hplip_autostart}"
+fi
+grep -Fqx 'Hidden=true' "${hplip_autostart}" || {
+    printf '%s\n' 'ERROR: HPLIP tray autostart was not disabled' >&2
+    exit 1
+}
 
 systemctl enable edbp-oobe.service
