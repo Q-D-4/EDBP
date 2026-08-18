@@ -1,0 +1,4 @@
+# Expose the full Debian Installer from the Live desktop as well as the UEFI
+# boot menu. The _live suffix makes live-build add this package only after the
+# install manifest snapshot, so live-installer removes it from /target.
+debian-installer-launcher

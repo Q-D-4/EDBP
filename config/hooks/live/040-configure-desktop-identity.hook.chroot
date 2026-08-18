@@ -6,6 +6,7 @@ sudoers_file=/etc/sudoers.d/localadmin
 oobe_script=/usr/local/sbin/edbp-oobe
 lo_policy=/etc/libreoffice/registry/edbp-defaults.xcd
 lo_registry_link=/usr/lib/libreoffice/share/registry/zz-edbp-defaults.xcd
+locale_compat=/etc/default/locale
 
 chown root:root \
     "${sudoers_file}" \
@@ -15,6 +16,7 @@ chown root:root \
     /etc/sddm.conf.d/hide-admin.conf \
     /etc/brave/policies/managed/policies.json \
     "${lo_policy}" \
+    /etc/xdg/baloofilerc \
     /etc/xdg/kxkbrc \
     /etc/xdg/plasma-localerc \
     /etc/xdg/mimeapps.list \
@@ -30,6 +32,7 @@ chmod 0644 \
     /etc/sddm.conf.d/hide-admin.conf \
     /etc/brave/policies/managed/policies.json \
     "${lo_policy}" \
+    /etc/xdg/baloofilerc \
     /etc/xdg/kxkbrc \
     /etc/xdg/plasma-localerc \
     /etc/xdg/mimeapps.list \
@@ -39,6 +42,9 @@ chmod 0644 \
 
 visudo --check --file "${sudoers_file}"
 bash -n "${oobe_script}"
+systemd-analyze verify edbp-oobe.service sddm.service
+grep -Fqx "Indexing-Enabled[\$i]=false" /etc/xdg/baloofilerc \
+    || { printf '%s\n' 'ERROR: Baloo indexing policy is missing' >&2; exit 1; }
 
 python3 - <<'PY'
 import json
@@ -135,10 +141,23 @@ else
     ln -s "${lo_policy}" "${lo_registry_link}"
 fi
 
-if [ ! -L /etc/default/locale ] \
-    || [ "$(readlink -f /etc/default/locale)" != /etc/locale.conf ]; then
-    printf '%s\n' 'ERROR: Debian locale compatibility link is missing or unexpected' >&2
+if [ -L "${locale_compat}" ]; then
+    [ "$(readlink -f "${locale_compat}")" = /etc/locale.conf ] || {
+        printf '%s\n' 'ERROR: unexpected Debian locale compatibility link' >&2
+        exit 1
+    }
+elif [ -f "${locale_compat}" ]; then
+    [ "$(stat -c '%u:%g' "${locale_compat}")" = '0:0' ] || {
+        printf '%s\n' 'ERROR: refusing to replace non-root locale file' >&2
+        exit 1
+    }
+    rm -f -- "${locale_compat}"
+    ln -s ../locale.conf "${locale_compat}"
+elif [ -e "${locale_compat}" ]; then
+    printf '%s\n' 'ERROR: refusing to replace unexpected locale object' >&2
     exit 1
+else
+    ln -s ../locale.conf "${locale_compat}"
 fi
 
 locale-gen en_US.UTF-8 ar_SY.UTF-8

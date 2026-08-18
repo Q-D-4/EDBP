@@ -2,15 +2,16 @@
 
 set -Eeuo pipefail
 
-readonly MARKER=/var/lib/edbp/oobe-complete
+readonly STATE_ROOT=/var/lib/edbp
+readonly TRANSACTION=${STATE_ROOT}/oobe-transaction
+readonly MARKER=${STATE_ROOT}/oobe-complete
 readonly ADMIN_USER=localadmin
+readonly SCANNER_GROUP=scanner
 readonly TITLE='EDBP First-Boot Setup'
 
 work_dir=''
 marker_tmp=''
 marker_installed=0
-created_user=''
-state_changed=0
 completed=0
 old_hostname=''
 new_hostname=''
@@ -47,18 +48,10 @@ cleanup() {
             rm -f -- "${MARKER}"
         fi
 
-        if (( state_changed == 1 )) && [[ -n "${work_dir}" ]]; then
-            log_message 'Provisioning failed; restoring the previous hostname files.'
-            cp -a -- "${work_dir}/hostname" /etc/hostname || true
-            cp -a -- "${work_dir}/hosts" /etc/hosts || true
-            if [[ -n "${old_hostname}" ]]; then
-                hostnamectl hostname "${old_hostname}" >/dev/null 2>&1 || true
+        if [[ -d "${TRANSACTION}" && ! -L "${TRANSACTION}" ]]; then
+            if ! rollback_transaction; then
+                log_message "ERROR: automatic rollback failed; retained ${TRANSACTION} for recovery."
             fi
-        fi
-
-        if [[ -n "${created_user}" ]]; then
-            log_message "Provisioning failed; removing the incomplete standard account ${created_user}."
-            userdel --remove "${created_user}" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -66,12 +59,13 @@ cleanup() {
         rm -f -- "${marker_tmp}"
     fi
 
-    if [[ -n "${work_dir}" ]]; then
+    if [[ -n "${work_dir}" && "${work_dir}" != "${TRANSACTION}" ]]; then
         rm -f -- \
             "${work_dir}/hostname" \
             "${work_dir}/hosts" \
             "${work_dir}/hostname.new" \
-            "${work_dir}/hosts.new"
+            "${work_dir}/hosts.new" \
+            "${work_dir}/username"
         rmdir -- "${work_dir}" >/dev/null 2>&1 || true
     fi
 
@@ -80,6 +74,57 @@ cleanup() {
 
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+
+remove_transaction_files() {
+    rm -f -- \
+        "${TRANSACTION}/hostname" \
+        "${TRANSACTION}/hosts" \
+        "${TRANSACTION}/hostname.new" \
+        "${TRANSACTION}/hosts.new" \
+        "${TRANSACTION}/username"
+    rmdir -- "${TRANSACTION}"
+}
+
+rollback_transaction() {
+    local transaction_user transaction_home restored_hostname
+
+    [[ -d "${TRANSACTION}" && ! -L "${TRANSACTION}" ]] || return 1
+    [[ "$(stat -c '%u:%g:%a' "${TRANSACTION}")" == '0:0:700' ]] || return 1
+
+    for state_file in hostname hosts username; do
+        [[ -f "${TRANSACTION}/${state_file}" \
+            && ! -L "${TRANSACTION}/${state_file}" ]] || return 1
+    done
+
+    transaction_user=$(<"${TRANSACTION}/username")
+    [[ "${transaction_user}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || return 1
+    [[ "${transaction_user}" != "${ADMIN_USER}" ]] || return 1
+
+    restored_hostname=$(<"${TRANSACTION}/hostname")
+    [[ -n "${restored_hostname}" ]] || return 1
+
+    log_message 'Recovering an interrupted OOBE transaction.'
+    cp -a -- "${TRANSACTION}/hostname" /etc/hostname || return 1
+    cp -a -- "${TRANSACTION}/hosts" /etc/hosts || return 1
+    hostnamectl hostname "${restored_hostname}" >/dev/null 2>&1 || return 1
+
+    if getent passwd "${transaction_user}" >/dev/null 2>&1; then
+        transaction_home=$(getent passwd "${transaction_user}" | awk -F: '{print $6}')
+        [[ "${transaction_home}" == "/home/${transaction_user}" ]] || return 1
+        userdel --remove "${transaction_user}" >/dev/null 2>&1 || true
+        getent passwd "${transaction_user}" >/dev/null 2>&1 && return 1
+    fi
+
+    if getent group "${transaction_user}" >/dev/null 2>&1; then
+        groupdel "${transaction_user}" >/dev/null 2>&1 || return 1
+    fi
+
+    remove_transaction_files || return 1
+    sync
+
+    work_dir=''
+    return 0
+}
 
 validate_hostname() {
     local candidate=$1
@@ -216,8 +261,8 @@ export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
 for required_command in \
-    awk chpasswd cp date getent hostnamectl id install mktemp mv rmdir \
-    sync systemctl systemd-cat useradd userdel whiptail; do
+    awk chmod chpasswd cp date getent groupdel hostnamectl id install mktemp mv \
+    rm rmdir stat sync systemctl systemd-cat useradd userdel whiptail; do
     command -v "${required_command}" >/dev/null 2>&1 \
         || fatal "Required command is missing: ${required_command}"
 done
@@ -234,6 +279,18 @@ id "${ADMIN_USER}" >/dev/null 2>&1 \
 
 if [[ " $(id -nG "${ADMIN_USER}") " != *' sudo '* ]]; then
     fatal 'localadmin is not a member of sudo. This also prevents the approved USBGuard IPC delegation.'
+fi
+
+scanner_group_entry=$(getent group "${SCANNER_GROUP}") \
+    || fatal 'The scanner device-access group is missing.'
+scanner_gid=$(awk -F: '{print $3}' <<<"${scanner_group_entry}")
+[[ "${scanner_gid}" =~ ^[0-9]+$ ]] \
+    || fatal 'The scanner group has an invalid numeric GID.'
+
+install -d -o root -g root -m 0755 "${STATE_ROOT}"
+if [[ -e "${TRANSACTION}" || -L "${TRANSACTION}" ]]; then
+    rollback_transaction \
+        || fatal "Interrupted OOBE state could not be recovered safely: ${TRANSACTION}"
 fi
 
 old_hostname=$(< /etc/hostname)
@@ -257,34 +314,53 @@ while :; do
     password=''
 done
 
-work_dir=$(mktemp -d /run/edbp-oobe.XXXXXX)
+work_dir=$(mktemp -d "${STATE_ROOT}/.oobe-transaction.XXXXXX")
+chmod 0700 "${work_dir}"
 cp -a -- /etc/hostname "${work_dir}/hostname"
 cp -a -- /etc/hosts "${work_dir}/hosts"
 
 printf '%s\n' "${new_hostname}" >"${work_dir}/hostname.new"
 render_hosts "${new_hostname}" </etc/hosts >"${work_dir}/hosts.new"
+printf '%s\n' "${new_username}" >"${work_dir}/username"
+chmod 0600 "${work_dir}/username"
+
+# Publish a complete rollback journal atomically before the first mutation.
+# If power is lost after this point, the next OOBE start restores the old
+# hostname and removes only the account named in this root-owned journal.
+sync -f "${work_dir}"
+mv -- "${work_dir}" "${TRANSACTION}"
+work_dir=${TRANSACTION}
+sync -f "${STATE_ROOT}"
 
 useradd \
     --create-home \
     --user-group \
+    --groups "${SCANNER_GROUP}" \
     --shell /bin/bash \
     --comment '' \
     "${new_username}"
-created_user=${new_username}
 
 printf '%s:%s\n' "${new_username}" "${password}" | chpasswd
 password=''
 
-# No supplementary groups are granted. In particular, the account is not in
-# sudo; desktop device access is delegated by logind/Polkit and service policy.
+# The only supplementary group is scanner, required by Debian's libsane udev
+# ACL. In particular, the account must not gain sudo, lpadmin, or plugdev.
 primary_gid=$(id -g "${new_username}")
 read -r -a account_gids <<<"$(id -G "${new_username}")"
+scanner_group_found=0
 for account_gid in "${account_gids[@]}"; do
-    [[ "${account_gid}" == "${primary_gid}" ]] \
-        || fatal 'The standard account unexpectedly received a supplementary group.'
+    if [[ "${account_gid}" == "${primary_gid}" ]]; then
+        continue
+    fi
+    if [[ "${account_gid}" == "${scanner_gid}" ]]; then
+        scanner_group_found=1
+        continue
+    fi
+    fatal 'The standard account unexpectedly received an unauthorized supplementary group.'
 done
+(( scanner_group_found == 1 )) \
+    || fatal 'The standard account did not receive scanner device access.'
 
-state_changed=1
 install -o root -g root -m 0644 "${work_dir}/hostname.new" /etc/hostname
 install -o root -g root -m 0644 "${work_dir}/hosts.new" /etc/hosts
 hostnamectl hostname "${new_hostname}"
@@ -292,8 +368,7 @@ hostnamectl hostname "${new_hostname}"
 # Make the account and hostname state durable before committing the marker.
 sync
 
-install -d -o root -g root -m 0755 /var/lib/edbp
-marker_tmp=$(mktemp /var/lib/edbp/.oobe-complete.XXXXXX)
+marker_tmp=$(mktemp "${STATE_ROOT}/.oobe-complete.XXXXXX")
 {
     printf 'EDBP_OOBE_VERSION=1\n'
     printf 'COMPLETED_AT=%s\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
@@ -307,7 +382,7 @@ trap '' HUP INT TERM
 mv -- "${marker_tmp}" "${MARKER}"
 marker_tmp=''
 marker_installed=1
-if ! sync -f /var/lib/edbp; then
+if ! sync -f "${STATE_ROOT}"; then
     trap 'exit 1' HUP INT TERM
     fatal 'The OOBE completion marker could not be synchronized to disk.'
 fi
@@ -318,6 +393,14 @@ trap 'exit 1' HUP INT TERM
 # authoritative guard because sddm.service also pulls this unit as a dependency.
 systemctl disable edbp-oobe.service >/dev/null 2>&1 \
     || log_message 'WARNING: completion marker written, but disabling edbp-oobe.service failed.'
+
+if remove_transaction_files; then
+    work_dir=''
+    sync -f "${STATE_ROOT}" \
+        || log_message 'WARNING: OOBE transaction cleanup was not synchronized.'
+else
+    log_message "WARNING: completed OOBE transaction remains at ${TRANSACTION}."
+fi
 
 log_message "Provisioning completed for host ${new_hostname}; standard account ${new_username} created."
 whiptail \

@@ -1,0 +1,75 @@
+#!/bin/sh
+
+set -eu
+
+check_sha256() {
+    expected=$1
+    path=$2
+
+    if [ ! -f "${path}" ] || [ -L "${path}" ]; then
+        printf 'ERROR: missing regular file: %s\n' "${path}" >&2
+        exit 1
+    fi
+
+    actual=$(sha256sum "${path}" | awk '{print $1}')
+    [ "${actual}" = "${expected}" ] \
+        || { printf 'ERROR: SHA-256 mismatch: %s\n' "${path}" >&2; exit 1; }
+}
+
+check_sha256 \
+    c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788 \
+    /usr/share/keyrings/brave-browser-archive-keyring.gpg
+check_sha256 \
+    c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
+    /usr/share/keyrings/element-io-archive-keyring.gpg
+check_sha256 \
+    04f5ff6be56fe60acd6b7ee031832b41e8671ae09c42ba141b91da04f0e0114a \
+    /etc/nftables.conf
+
+trusted_keyring=$(apt-config shell value Dir::Etc::Trusted | sed -n "s/^value='\(.*\)'$/\1/p")
+trusted_parts=$(apt-config shell value Dir::Etc::TrustedParts | sed -n "s/^value='\(.*\)'$/\1/p")
+[ "${trusted_keyring}" = /usr/share/keyrings/debian-archive-keyring.gpg ] \
+    || { printf '%s\n' 'ERROR: APT global keyring scope drifted' >&2; exit 1; }
+[ "${trusted_parts}" = /etc/apt/keyrings ] \
+    || { printf '%s\n' 'ERROR: APT trusted-parts scope drifted' >&2; exit 1; }
+
+/usr/sbin/nft --check --file /etc/nftables.conf
+/usr/bin/usbguard-rule-parser --file /etc/usbguard/rules.conf >/dev/null
+visudo --check --file /etc/sudoers.d/localadmin
+
+for forbidden_package in \
+    bluez \
+    bluedevil \
+    libspa-0.2-bluetooth; do
+    if dpkg-query -W -f='${Status}\n' "${forbidden_package}" 2>/dev/null \
+        | grep -qx 'install ok installed'; then
+        printf 'ERROR: forbidden Bluetooth package installed: %s\n' \
+            "${forbidden_package}" >&2
+        exit 1
+    fi
+done
+
+if grep -R -E \
+    '^[[:space:]]*(blacklist|install)[[:space:]]+(usb_storage|uas)([[:space:]]|$)' \
+    /etc/modprobe.d; then
+    printf '%s\n' 'ERROR: kernel-level USB storage denial conflicts with USBGuard delegation' >&2
+    exit 1
+fi
+
+for unit in nftables.service usbguard.service edbp-oobe.service; do
+    systemctl is-enabled "${unit}" >/dev/null \
+        || { printf 'ERROR: required unit is not enabled: %s\n' "${unit}" >&2; exit 1; }
+done
+
+for unit in usbguard-dbus.service dbus-org.usbguard.service; do
+    state=$(systemctl is-enabled "${unit}" 2>/dev/null || true)
+    [ "${state}" = masked ] \
+        || { printf 'ERROR: USBGuard D-Bus activation is not masked: %s\n' "${unit}" >&2; exit 1; }
+done
+
+grep -Fqx 'RefuseManualStart=yes' \
+    /etc/systemd/system/usbguard-dbus.service.d/10-edbp-deny-activation.conf \
+    || { printf '%s\n' 'ERROR: USBGuard D-Bus manual-start denial is missing' >&2; exit 1; }
+grep -Fqx 'ConditionPathExists=/run/edbp-enable-usbguard-dbus' \
+    /etc/systemd/system/usbguard-dbus.service.d/10-edbp-deny-activation.conf \
+    || { printf '%s\n' 'ERROR: USBGuard D-Bus activation condition is missing' >&2; exit 1; }

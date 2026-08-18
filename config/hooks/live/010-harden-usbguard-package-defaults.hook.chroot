@@ -2,6 +2,8 @@
 
 set -eu
 
+dbus_deny_dropin=/etc/systemd/system/usbguard-dbus.service.d/10-edbp-deny-activation.conf
+
 # Debian's usbguard postinst creates a plugdev ACL on first installation. That
 # is broader than EDBP's localadmin/sudo policy and would remain effective even
 # though IPCAllowedGroups is not configured.
@@ -15,8 +17,14 @@ elif [ -e "${legacy_acl}" ] || [ -L "${legacy_acl}" ]; then
 fi
 
 # The CLI talks directly to usbguard.service. The additional D-Bus bridge is
-# not required and ships a broader plugdev Polkit rule, so keep it disabled.
+# not required and its Polkit rule can append persistent policy for plugdev or
+# sudo members. Disable and mask both the unit and its D-Bus activation alias;
+# a mere disable would not be a sufficient activation barrier.
 systemctl disable usbguard-dbus.service
+systemctl mask usbguard-dbus.service dbus-org.usbguard.service
+
+chown root:root "${dbus_deny_dropin}"
+chmod 0644 "${dbus_deny_dropin}"
 
 chmod 0600 \
     /etc/usbguard/rules.conf \
