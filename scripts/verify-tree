@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2016  # Literal crypt(3) dollar markers are intentional.
 
 set -Eeuo pipefail
 
@@ -59,9 +60,72 @@ shellcheck -x --severity=style \
     config/includes.installer/edbp-late-command \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
     scripts/stage-admin-keys \
+    scripts/stage-localadmin-password \
     scripts/verify-tree
 
-debconf-set-selections --checkonly config/includes.installer/preseed.cfg
+preseed_template=config/includes.installer/preseed.cfg.in
+preseed_staged=config/includes.installer/preseed.cfg
+
+[[ -f "${preseed_template}" && ! -L "${preseed_template}" ]] \
+    || fail 'tracked preseed template must be a regular non-symlink file'
+
+if git ls-files --error-unmatch "${preseed_staged}" >/dev/null 2>&1; then
+    fail 'generated secret-bearing preseed.cfg must not be tracked'
+fi
+
+if git ls-files --error-unmatch \
+    secrets/localadmin_password_hash >/dev/null 2>&1; then
+    fail 'localadmin password hash source must not be tracked'
+fi
+
+for ignored_path in \
+    secrets/localadmin_password_hash \
+    config/includes.installer/localadmin_authorized_keys \
+    "${preseed_staged}" \
+    "edbp-${version}-amd64.build-inputs.json"; do
+    git check-ignore --quiet "${ignored_path}" \
+        || fail "generated/secret path is not protected by .gitignore: ${ignored_path}"
+done
+
+grep -Fqx \
+    'd-i passwd/user-password-crypted password @@EDBP_LOCALADMIN_PASSWORD_HASH@@' \
+    "${preseed_template}" \
+    || fail 'preseed template does not contain the exact password-hash token line'
+
+validation_directory=$(mktemp -d)
+trap 'rm -rf -- "${validation_directory}"' EXIT
+
+admin_keys_file=${EDBP_ADMIN_KEYS_FILE:-secrets/localadmin_authorized_keys}
+./scripts/stage-admin-keys \
+    "${admin_keys_file}" \
+    "${validation_directory}/localadmin_authorized_keys" >/dev/null
+
+password_hash_file=${EDBP_LOCALADMIN_PASSWORD_HASH_FILE:-secrets/localadmin_password_hash}
+allow_test_hash=${EDBP_ALLOW_TEST_PASSWORD_HASH:-0}
+case "${allow_test_hash}" in
+    0|1)
+        ;;
+    *)
+        fail 'EDBP_ALLOW_TEST_PASSWORD_HASH must be either 0 or 1'
+        ;;
+esac
+
+if [[ ! -e "${password_hash_file}" \
+    && ! -L "${password_hash_file}" \
+    && "${allow_test_hash}" == 1 ]]; then
+    password_hash_file=${validation_directory}/synthetic-test-password-hash
+    test_checksum=$(printf '%086d' 0)
+    printf '$6$EDBPtest$%s\n' "${test_checksum}" >"${password_hash_file}"
+    chmod 0600 "${password_hash_file}"
+fi
+
+rendered_preseed=${validation_directory}/preseed.cfg
+./scripts/stage-localadmin-password \
+    "${password_hash_file}" \
+    "${preseed_template}" \
+    "${rendered_preseed}" >/dev/null
+
+debconf-set-selections --checkonly "${rendered_preseed}"
 
 for forbidden_question in \
     'partman-auto/disk' \
@@ -69,31 +133,45 @@ for forbidden_question in \
     'partman/choose_partition' \
     'passwd/user-password' \
     'passwd/user-password-again' \
-    'passwd/user-password-crypted' \
     'passwd/root-password' \
     'passwd/root-password-again' \
     'passwd/root-password-crypted'; do
     if awk -v question="${forbidden_question}" \
         '$1 == "d-i" && $2 == question { found = 1 } END { exit !found }' \
-        config/includes.installer/preseed.cfg; then
+        "${rendered_preseed}"; then
         fail "unsafe or secret-bearing preseed question found: ${forbidden_question}"
     fi
 done
 
+if [[ $(awk \
+    '$1 == "d-i" && $2 == "passwd/user-password-crypted" && $3 == "password" { count += 1 } END { print count + 0 }' \
+    "${rendered_preseed}") != 1 ]]; then
+    fail 'rendered preseed must contain exactly one encrypted localadmin password record'
+fi
+
+grep -Eq \
+    '^d-i[[:space:]]+passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    "${rendered_preseed}" \
+    || fail 'rendered preseed does not contain an accepted crypt(3) hash'
+
+if grep -Fq '@@EDBP_LOCALADMIN_PASSWORD_HASH@@' "${rendered_preseed}"; then
+    fail 'password-hash token survived preseed rendering'
+fi
+
 if grep -E \
     '^[[:space:]]*d-i[[:space:]]+partman[^[:space:]]*[[:space:]]+boolean[[:space:]]+true([[:space:]]|$)' \
-    config/includes.installer/preseed.cfg >/dev/null; then
+    "${rendered_preseed}" >/dev/null; then
     fail 'partition confirmation must not be pre-answered true'
 fi
 
 grep -Fqx 'd-i passwd/username string localadmin' \
-    config/includes.installer/preseed.cfg \
+    "${rendered_preseed}" \
     || fail 'preseed does not create localadmin'
 grep -Fqx 'd-i passwd/root-login boolean false' \
-    config/includes.installer/preseed.cfg \
+    "${rendered_preseed}" \
     || fail 'root login is not disabled in preseed'
 grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
-    config/includes.installer/preseed.cfg \
+    "${rendered_preseed}" \
     || fail 'installer finalization command is missing'
 
 visudo --check --file \
@@ -152,9 +230,14 @@ if git grep -nE \
 fi
 
 if git ls-files --error-unmatch \
-    config/includes.installer/localadmin_authorized_keys \
-    >/dev/null 2>&1; then
+    config/includes.installer/localadmin_authorized_keys >/dev/null 2>&1; then
     fail 'generated localadmin authorized_keys must not be tracked'
+fi
+
+if git grep -nE \
+    'passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    -- .; then
+    fail 'a localadmin crypt(3) hash is present in tracked content'
 fi
 
 for forbidden_package in \
@@ -173,10 +256,5 @@ if grep -R -E \
     config/includes.chroot_after_packages/etc/modprobe.d; then
     fail 'USB storage is blocked at kernel level instead of delegated to USBGuard'
 fi
-
-admin_keys_file=${EDBP_ADMIN_KEYS_FILE:-secrets/localadmin_authorized_keys}
-temporary_keys=$(mktemp)
-trap 'rm -f -- "${temporary_keys}"' EXIT
-./scripts/stage-admin-keys "${admin_keys_file}" "${temporary_keys}" >/dev/null
 
 printf 'EDBP source verification passed for version %s.\n' "${version}"

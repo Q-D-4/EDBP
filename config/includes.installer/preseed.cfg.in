@@ -1,8 +1,8 @@
-### EDBP Debian Installer partial preseed
-### This file is embedded as /preseed.cfg in the installer initrd.
+### EDBP Debian Installer partial preseed template
+### scripts/stage-localadmin-password renders this file as /preseed.cfg.
 
-# Apply only the reviewed defaults below. Unseeded questions remain
-# interactive, including the localadmin password and every partitioning step.
+# Apply only the reviewed defaults below. Unseeded partitioning questions stay
+# interactive. The password token is replaced atomically at build time.
 d-i auto-install/cloak_initrd_preseed boolean true
 
 ### Locale, keyboard, and clock
@@ -24,12 +24,14 @@ d-i netcfg/get_domain string unassigned-domain
 d-i netcfg/wireless_wep string
 
 ### Identity
-# No passwd/user-password* value is permitted in this repository. The
-# installer must prompt twice for a unique localadmin console password.
+# The token below MUST occur exactly once and MUST never reach an ISO. The
+# renderer accepts only a mode-0600, non-symlink yescrypt or SHA-512-crypt
+# source file and writes the generated preseed with mode 0600.
 d-i passwd/root-login boolean false
 d-i passwd/make-user boolean true
 d-i passwd/user-fullname string Local Administrator
 d-i passwd/username string localadmin
+d-i passwd/user-password-crypted password @@EDBP_LOCALADMIN_PASSWORD_HASH@@
 d-i passwd/user-default-groups string sudo
 d-i user-setup/allow-password-weak boolean false
 

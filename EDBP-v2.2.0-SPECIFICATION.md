@@ -30,11 +30,17 @@ a **Golden Master** only after:
 4. two independent UEFI installations pass the VM and forensic tests;
 5. the cybersecurity owner accepts the documented nftables limitations;
 6. the actual printer, scanner, hub, dock, and USB VID/PID inventory passes a
-   hardware pilot.
+   hardware pilot;
+7. the shared-password exception has an owner, vault record, expiry date,
+   rotation/recovery procedure, and tested replacement path.
 
-No shared administrator password, password hash, SSH private key, or API token
-may be committed or embedded. The installer asks for a unique console password
-for `localadmin`. Only reviewed ED25519 public keys are injected at build time.
+No plaintext administrator password, password hash, SSH private key, or API
+token may be committed. As a time-bounded deployment exception, the build
+controller reads a shared `localadmin` crypt(3) hash from an ignored mode-0600
+file and renders it into the installer preseed. The hash is consequently
+embedded in the installer initrd and is extractable for offline attack; it is
+not equivalent to a secret-management system. Only reviewed ED25519 public
+keys and the explicitly supplied password hash are injected at build time.
 
 ### 1.1 Deliberate path corrections
 
@@ -62,7 +68,7 @@ for `localadmin`. Only reviewed ED25519 public keys are injected at build time.
 | Default network profile | Isolated LAN-only |
 | External internet exception | Temporary `systemctl stop nftables.service` |
 | Update source | Debian/vendor HTTPS repositories or future internal mirror |
-| Installed administrator | `localadmin`, password-authenticated sudo, SSH key-only |
+| Installed administrator | `localadmin`, build-injected shared console/sudo password, SSH key-only |
 | Daily user | Created by OOBE; no sudo; `scanner` is the sole supplementary group |
 | UI language | English |
 | LibreOffice UI | Arabic, Tabbed Notebookbar |
@@ -108,7 +114,7 @@ whether LUKS is mandatory before Golden Master approval.
 ### Layer 04 — Installer, SSH enrollment, final hooks, automation
 
 - partial initrd preseed that never selects or confirms a disk;
-- unique installer password prompt for `localadmin`;
+- build-time `localadmin` password-hash injection with no password prompt;
 - build-time ED25519 public-key injection;
 - per-install SSH host-key generation;
 - SSH public-key-only hardening;
@@ -118,8 +124,8 @@ whether LUKS is mandatory before Golden Master approval.
 
 ## 4. Complete repository tree
 
-Generated `live-build` state, build directories, ISO artifacts, checksums, and
-the staged `localadmin_authorized_keys` file are intentionally ignored.
+Generated `live-build` state, build directories, ISO artifacts, checksums,
+local secret inputs, and staged installer inputs are intentionally ignored.
 
 ```text
 EDBP/
@@ -153,7 +159,7 @@ EDBP/
 │   │       └── 090-clean-image.hook.chroot
 │   ├── includes.installer/
 │   │   ├── edbp-late-command
-│   │   └── preseed.cfg
+│   │   └── preseed.cfg.in
 │   ├── includes.chroot_after_packages/
 │   │   ├── etc/
 │   │   │   ├── brave/policies/managed/policies.json
@@ -196,14 +202,19 @@ EDBP/
 │       └── security-core.list.chroot
 └── scripts/
     ├── stage-admin-keys
+    ├── stage-localadmin-password
     └── verify-tree
 ```
 
-The generated file below is embedded in the installer initrd but MUST NOT be
+The local source inputs and generated installer files below MUST NOT be
 tracked:
 
 ```text
+secrets/localadmin_authorized_keys
+secrets/localadmin_password_hash
 config/includes.installer/localadmin_authorized_keys
+config/includes.installer/preseed.cfg
+edbp-2.2.0-amd64.build-inputs.json
 ```
 
 ---
@@ -227,10 +238,11 @@ current directory and validates `VERSION`. Its critical values are:
 | `--checksums` | `sha256` | Media integrity metadata; D-I also adds MD5 as required |
 | SquashFS compression | `xz` | Minimum image size, slower build/boot decompression |
 
-`config/includes.installer/preseed.cfg` is copied to the root of both installer
-initrds. Debian Installer automatically loads a root-level `preseed.cfg`; a
-`preseed/file=/cdrom/...` argument is therefore neither needed nor correct for
-this layout.
+`config/includes.installer/preseed.cfg.in` is the tracked, secret-free source.
+The build controller renders `config/includes.installer/preseed.cfg`, which is
+copied to the root of both installer initrds. Debian Installer automatically
+loads a root-level `preseed.cfg`; a `preseed/file=/cdrom/...` argument is
+therefore neither needed nor correct for this layout.
 
 Build and runtime Debian mirror URLs are overridable using:
 
@@ -500,18 +512,31 @@ approval.
 
 ## 11. SSH and administrative identity
 
-### 11.1 Build input
+### 11.1 Build inputs
 
-The operator supplies:
+The operator supplies two ignored files:
 
 ```text
 secrets/localadmin_authorized_keys
+secrets/localadmin_password_hash
 ```
 
 `scripts/stage-admin-keys` accepts 1–20 unadorned ED25519 or security-key
 ED25519 public keys, validates them with `ssh-keygen`, removes blank/full-line
 comment records while preserving each public key's inline label, and writes an
 ignored mode-0600 installer input. RSA and private keys are rejected.
+
+`scripts/stage-localadmin-password` accepts exactly one newline-terminated
+yescrypt (`$y$`) or SHA-512-crypt (`$6$`) record. The source must be a regular,
+non-symlink file owned by the invoking build user with no group/other access.
+Its parent must be owned by root/the build user and not group/other writable.
+The script replaces exactly one token in `preseed.cfg.in`, rejects plaintext
+password questions, and atomically writes ignored `preseed.cfg` with mode
+0600. It never prints or passes the hash as a process argument.
+
+These tasks remain separate by design: public-key normalization and secret
+preseed rendering have different input classes, validators, and cleanup
+requirements. `stage-build-inputs` in the Makefile composes them transactionally.
 
 ### 11.2 Installed policy
 
@@ -523,8 +548,11 @@ ignored mode-0600 installer input. RSA and private keys are rejected.
   environment denied;
 - verbose authentication logging, three attempts, 30-second grace time.
 
-The console password remains necessary for local login and password-authenticated
-`sudo`; it is never an SSH method.
+The shared console password remains necessary for local login and
+password-authenticated `sudo`; it is never an SSH method. This shared-password
+exception MUST be retired in favor of per-machine random escrow, centralized
+identity, or another reviewed privileged-access design once SSH management is
+operational.
 
 ### 11.3 Per-machine SSH identity
 
@@ -536,16 +564,22 @@ host-key and machine-id hashes.
 
 ## 12. Debian Installer and partition safety
 
-The partial preseed answers locale, timezone, temporary hostname, fixed admin
-username, root-login policy, mirror policy, and GPT default. It deliberately
-does not answer:
+The rendered partial preseed answers locale, timezone, temporary hostname,
+fixed admin username, the encrypted `localadmin` password, root-login policy,
+mirror policy, and GPT default. It deliberately does not answer:
 
 - target disk;
 - partitioning method or recipe;
 - removal of existing LVM/MD metadata;
 - final partition selection;
 - write-label or destructive confirmation;
-- `localadmin` password fields.
+- plaintext `passwd/user-password` or `passwd/user-password-again` fields;
+- any root-password field.
+
+Only `passwd/user-password-crypted` is seeded. This causes Debian Installer to
+skip both interactive user-password prompts without exposing plaintext to
+debconf. It does not hide the resulting hash from an operator who can inspect
+the ISO/initrd or an installed machine's protected shadow database.
 
 `partman/early_command` refuses installation when `/sys/firmware/efi` is
 absent. Bootloader configuration is UEFI-only, so this is a second guard.
@@ -556,7 +590,7 @@ The installer flow is:
 UEFI boot
   -> graphical Debian Installer
   -> reviewed locale/time defaults
-  -> unique localadmin password prompt
+  -> injected crypt(3) hash creates localadmin without a password prompt
   -> operator selects disk and partitioning/encryption
   -> operator confirms destructive write
   -> Live filesystem copied to /target
@@ -739,39 +773,88 @@ sudo apt install --yes \
     live-build debootstrap squashfs-tools xorriso \
     grub-efi-amd64-bin shim-signed mtools dosfstools \
     make git jq openssh-client sudo shellcheck \
-    debconf-utils python3 ca-certificates
+    debconf-utils python3 ca-certificates whois
 ```
 
 Build as an unprivileged dedicated user with narrowly controlled sudo access
 to `lb build`/`lb clean`. Do not build inside a developer's daily workstation
 profile for a signed release.
 
-### 17.2 Administrative key input
+### 17.2 Administrative build inputs
 
 ```bash
-mkdir -p secrets
+install -d -m 0700 secrets
 ssh-keygen -t ed25519 -a 100 -f secrets/edbp_admin -C edbp-admin
-cp secrets/edbp_admin.pub secrets/localadmin_authorized_keys
+install -m 0600 secrets/edbp_admin.pub secrets/localadmin_authorized_keys
+
+# Prompts on the terminal; plaintext is not placed in argv or shell history.
+umask 077
+mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+chmod 0600 secrets/localadmin_password_hash
 ```
 
 The private file `secrets/edbp_admin` must be moved to approved key custody and
-must never accompany the ISO.
+must never accompany the ISO. The password itself MUST be generated and stored
+through the approved credential vault; it MUST NOT appear in a command-line
+argument, ticket, Git commit, build log, or technician document.
 
-### 17.3 Targets
+The shared password SHOULD have at least 20 randomly generated characters.
+Human-memorable organizational names, seasons, keyboard walks, and predictable
+suffixes are prohibited. A salted password hash slows guessing but does not
+prevent offline guessing after ISO extraction.
+
+### 17.3 Injection and cleanup transaction
+
+`make config` first runs the clean-tree verifier, stages the normalized public
+keys, and renders the encrypted-password line from `preseed.cfg.in`. The real
+hash is read from the source file inside the renderer; it is never interpolated
+by Make or placed in process arguments. If either staging operation fails, both
+outputs are deleted.
+
+The generated files are:
+
+```text
+config/includes.installer/localadmin_authorized_keys
+config/includes.installer/preseed.cfg
+edbp-2.2.0-amd64.build-inputs.json
+```
+
+The first two exist only because `live-build` must read them while assembling
+the installer initrd. `make build` and the production `make all` entry point
+install EXIT/signal traps that remove both secret-bearing files after success,
+failure, or interrupt. `make config` intentionally leaves them staged for a
+later build and therefore prints a warning; the operator MUST follow it with
+`make build` or `make clean`.
+
+The third file is a non-secret provenance artifact created at staging time. It
+contains only SHA-256 fingerprints of the exact normalized public keys,
+injected crypt string, template, and rendered preseed. Capturing these values
+before the long build closes the race where a source secret could be rotated
+mid-build and later be misidentified as the value embedded in the ISO.
+
+The source files under `secrets/` are not deleted automatically. They are
+external controlled inputs and remain under the build-controller custody
+policy. Neither provenance JSON file contains the password hash value.
+
+### 17.4 Targets
 
 | Target | Behavior |
 |---|---|
-| `make verify` | Clean-tree, ShellCheck/syntax, preseed safety, key, XML/JSON/sudo, hashes, and forbidden-content checks |
-| `make config` | Verify, stage public keys, run repository `auto/config` |
-| `make build` | Configure, run `sudo lb build`, retain `build.log` |
-| `make all` | Build, create checksums/manifest, verify checksums |
+| `make verify` | Require and validate both real inputs; render preseed only in a temporary directory; run all static/security checks |
+| `make verify-test` | Permit a synthetic non-login hash only for temporary static validation when the real hash file is absent; cannot satisfy build dependencies |
+| `make stage-build-inputs` | Transactionally stage public keys and the rendered secret-bearing preseed |
+| `make config` | Verify, stage both inputs, run repository `auto/config`; leaves staged files for build |
+| `make build` | Configure, run privileged `lb build` (`sudo` for the normal unprivileged builder), retain `build.log`, scrub staged inputs on every exit path |
+| `make all` | Trap cleanup, build, create checksums/manifest, and verify checksums |
 | `make verify-checksums` | Verify existing `SHA256SUMS` and manifest paths |
-| `make clean` | Purge live-build state and explicit generated artifacts/input |
+| `make scrub-build-inputs` | Delete only generated preseed and staged authorized keys |
+| `make clean` | Purge live-build state and generated artifacts/staged inputs; preserve source secrets |
 
 Production build:
 
 ```bash
 git status --short
+git check-ignore --quiet secrets/localadmin_password_hash
 make clean
 make verify
 make all
@@ -782,16 +865,18 @@ Expected artifacts:
 ```text
 edbp-2.2.0-amd64.hybrid.iso
 edbp-2.2.0-amd64.packages
+edbp-2.2.0-amd64.build-inputs.json
 edbp-2.2.0-amd64.manifest.json
 SHA256SUMS
 build.log
 ```
 
 The JSON manifest records version, architecture, Git commit,
-`SOURCE_DATE_EPOCH` and its UTC rendering, manifest-creation time, public-key
-input hash, ISO hash, and package-manifest hash. `make verify-checksums`
-recomputes every recorded source/artifact identity except the informational
-manifest-creation time.
+`SOURCE_DATE_EPOCH` and its UTC rendering, manifest-creation time, SHA-256
+fingerprints for the normalized public-key payload, injected password hash,
+preseed template, rendered preseed, plus ISO, package-manifest, and
+build-input-record hashes. `make verify-checksums` recomputes every recorded
+artifact identity except the informational manifest-creation time.
 
 ---
 
@@ -805,10 +890,15 @@ git fsck --full
 git diff --check origin/main...HEAD
 make verify
 git grep -nE 'BEGIN (OPENSSH|RSA|EC|DSA|PRIVATE) PRIVATE KEY' -- .
+git check-ignore --quiet secrets/localadmin_password_hash
+test "$(stat -c '%a' secrets/localadmin_password_hash)" = 600
 ```
 
 `make verify` intentionally refuses a dirty source tree. During development
 only, `EDBP_ALLOW_DIRTY=1` may be supplied; such a build cannot be released.
+If the real hash file is intentionally absent during source-only CI,
+`make verify-test` renders a synthetic non-login hash solely under `mktemp`.
+That fallback is not reachable from `make config`, `make build`, or `make all`.
 
 ### 18.2 ISO structure and UEFI
 
@@ -827,6 +917,9 @@ Acceptance:
 - graphical installer and Live entries present;
 - embedded installer initrd contains `/preseed.cfg`, `/edbp-late-command`, and
   `/localadmin_authorized_keys`;
+- `/preseed.cfg` contains exactly one `$y$` or `$6$`
+  `passwd/user-password-crypted` record, contains no plaintext-password
+  record, and contains no unresolved template token;
 - no SSH private key exists anywhere in the ISO.
 
 ### 18.3 UEFI VM boot
@@ -857,12 +950,14 @@ For NVMe-emulated and SATA-emulated disks, verify:
 
 1. no BIOS boot path;
 2. installer English locale and Damascus timezone defaults;
-3. localadmin password prompt appears twice;
+3. no localadmin or root password prompt appears;
 4. disk and recipe selection remain interactive;
 5. final destructive confirmation appears;
 6. GPT and EFI System Partition are created for guided UEFI installation;
 7. installed system boots without ISO;
-8. OOBE blocks SDDM until completion.
+8. the controlled shared password authenticates `localadmin` locally and
+   satisfies password-required `sudo`;
+9. OOBE blocks SDDM until completion.
 
 ### 18.5 Installed-system checks
 
@@ -919,6 +1014,9 @@ the same approved fleet management key.
 
 - clean committed source and reviewed PR;
 - real ED25519 admin public-key input, private key in approved custody;
+- real high-entropy localadmin hash input owned/mode-0600 on the isolated build
+  controller; password held in the approved vault;
+- documented shared-password expiry, fleet rotation, and break-glass process;
 - successful full `make all` on Debian 13 builder;
 - checksum and provenance artifacts retained;
 - two UEFI install/boot/OOBE passes;
@@ -977,6 +1075,13 @@ the same approved fleet management key.
 10. **No branding asset is fabricated.** The repository retains the packaged
     Breeze background until an approved wallpaper/logo file, dimensions,
     license, and checksum are supplied through change control.
+11. **A shared fleet password has fleet-wide blast radius.** Its crypt(3) hash
+    is recoverable from every distributed ISO and installed shadow database.
+    Compromise or offline cracking of one value affects every machine built
+    from that input. Build-time injection prevents Git/log disclosure; it does
+    not create per-device uniqueness or protect a weak password. This exception
+    is acceptable only as a dated migration control, not a steady-state
+    privileged-access architecture.
 
 ---
 
@@ -1006,7 +1111,8 @@ new artifact manifest:
 - USBGuard policy or IPC ACL;
 - Bluetooth module denial;
 - SSH policy or injected public keys;
-- Preseed identity/partitioning questions;
+- password-hash algorithm, source, rotation, renderer, or staged output;
+- Preseed identity/partitioning questions or template token;
 - installer late command;
 - OOBE transaction/marker behavior;
 - enabled daemon set;

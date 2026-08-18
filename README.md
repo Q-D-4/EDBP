@@ -17,16 +17,26 @@ Live environment وDebian Installer تفاعلياً آمناً.
 sudo apt install live-build debootstrap squashfs-tools xorriso \
     grub-efi-amd64-bin shim-signed mtools dosfstools \
     make git jq openssh-client sudo shellcheck \
-    debconf-utils python3 ca-certificates
+    debconf-utils python3 ca-certificates whois
 
-mkdir -p secrets
+install -d -m 0700 secrets
 ssh-keygen -t ed25519 -f secrets/edbp_admin -C edbp-admin
 cp secrets/edbp_admin.pub secrets/localadmin_authorized_keys
+mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+chmod 0600 secrets/localadmin_authorized_keys \
+    secrets/localadmin_password_hash
 
 make verify
 make all
 ```
 
-لا تُضمّن المفاتيح الخاصة أو كلمة مرور مشتركة داخل المشروع أو ISO. يطلب
-Debian Installer كلمة مرور فريدة لـ`localadmin`، ويُحقن المفتاح العام فقط من
-`secrets/localadmin_authorized_keys` أثناء البناء.
+لا تمرر كلمة المرور الصريحة كوسيط لسطر الأوامر. `mkpasswd` يطلبها تفاعلياً،
+والمشروع يقرأ فقط crypt(3) hash من الملف المحلي غير المتتبع. يُولّد
+`config/includes.installer/preseed.cfg` وقت البناء ثم يُحذف تلقائياً مع ملف
+المفتاح المرحلي بعد `lb build`.
+
+هذه آلية انتقالية وليست خزنة أسرار: الهاش مضمّن في initrd ويمكن استخراجه من
+الـISO ومحاولة كسره دون اتصال. كلمة واحدة لـ600 جهاز تعني أن كشفها على جهاز
+واحد يعرّض الأسطول كله؛ يجب تدويرها وإلغاء الاعتماد عليها فور اكتمال إدارة
+SSH. لفحص المصدر فقط دون ملف هاش حقيقي استخدم `make verify-test`؛ هذا الهدف
+لا يستطيع تشغيل `config` أو `build`.
