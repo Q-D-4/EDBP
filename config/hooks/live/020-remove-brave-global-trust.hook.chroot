@@ -36,13 +36,17 @@ origin_source=/etc/apt/sources.list.d/brave-origin.sources
 origin_key=/usr/share/keyrings/brave-origin.gpg
 
 if [ -f "${origin_source}" ] && [ ! -L "${origin_source}" ]; then
-    grep -Fqx 'Types: deb' "${origin_source}" \
+    if ! {
+        grep -Fqx 'Types: deb' "${origin_source}" \
         && grep -Fqx 'URIs: https://dl.google.com/linux/chrome-stable/deb/' "${origin_source}" \
         && grep -Fqx 'Suites: stable' "${origin_source}" \
         && grep -Fqx 'Components: main' "${origin_source}" \
         && grep -Fqx 'Architectures: amd64' "${origin_source}" \
-        && grep -Fqx 'Signed-By: /usr/share/keyrings/brave-origin.gpg' "${origin_source}" \
-        || { printf '%s\n' 'ERROR: unexpected Brave Origin APT source' >&2; exit 1; }
+        && grep -Fqx 'Signed-By: /usr/share/keyrings/brave-origin.gpg' "${origin_source}"
+    }; then
+        printf '%s\n' 'ERROR: unexpected Brave Origin APT source' >&2
+        exit 1
+    fi
     rm -f -- "${origin_source}"
 elif [ -e "${origin_source}" ] || [ -L "${origin_source}" ]; then
     printf '%s\n' 'ERROR: refusing to remove unexpected Brave Origin source object' >&2
