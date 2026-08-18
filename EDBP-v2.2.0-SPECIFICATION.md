@@ -320,10 +320,10 @@ by the workstation role is promoted into a tracked package list.
 | Function | Explicit packages |
 |---|---|
 | Plasma/SDDM | `plasma-desktop`, `sddm`, `sddm-theme-breeze`, `xserver-xorg` |
-| Plasma operations | `kscreen`, `plasma-nm`, `plasma-pa`, `powerdevil`, `systemsettings`, `xdg-desktop-portal-kde`, `kio-extras` |
-| User shell | `dolphin`, `konsole`, `ark`, `kate`, `7zip`, `bzip2`, `unzip`, `zip` |
+| Plasma operations | `kscreen`, `plasma-nm`, `plasma-pa`, `powerdevil`, `upower`, `systemsettings`, `xdg-desktop-portal-kde`, `kio-extras`, `kf6-breeze-icon-theme` |
+| User shell | `dolphin`, `konsole`, `ark`, `kate`, `lsof`, `sonnet6-plugins`, `7zip`, `bzip2`, `unzip`, `zip` |
 | Network | `network-manager`, `wpasupplicant`, `wireless-regdb` |
-| Audio | `pipewire`, `pipewire-pulse`, `pipewire-alsa`, `wireplumber` |
+| Audio | `pipewire`, `pipewire-pulse`, `pipewire-alsa`, `wireplumber`, `rtkit` |
 
 `task-kde-desktop`, `kde-standard`, Discover, games, PIM, Welcome, BlueDevil,
 and `pipewire-audio` are excluded. `pipewire-audio` would hard-depend on the
@@ -364,6 +364,9 @@ not justified by the English/Arabic role.
 `printer-driver-all` contains drivers as Recommends, so its Trixie set is
 expanded explicitly. Proprietary HP plug-ins and Epson ESC/P-R2 packages are
 not universal and require a model-specific signed-package review.
+The HP GUI remains available on demand, while hook `040` sets `Hidden=true` on
+the package's XDG autostart descriptor so `hp-systray` does not consume memory
+or execute Python helpers in every user session.
 
 ### 7.5 Security, identity, and Live runtime
 
@@ -371,7 +374,7 @@ not universal and require a model-specific signed-package review.
 |---|---|
 | Security | `usbguard`, `nftables`, `openssh-server`, `sudo`, `ca-certificates` |
 | OOBE | `whiptail`, `passwd`, `python3-minimal`, `kbd` |
-| Live runtime | `user-setup`, `locales`, `keyboard-configuration` |
+| Live runtime | `user-setup`, `locales`, `keyboard-configuration`, `console-setup` |
 | Live-only installer UI | `debian-installer-launcher`; `_live` suffix causes removal from installed target |
 
 ---
@@ -587,8 +590,8 @@ host-key and machine-id hashes.
 
 ## 12. Debian Installer and partition safety
 
-The rendered partial preseed answers locale, timezone, temporary hostname,
-fixed admin username, the encrypted `localadmin` password, root-login policy,
+The rendered partial preseed answers locale, timezone, fixed admin username,
+the encrypted `localadmin` password, root-login policy, offline network policy,
 mirror policy, and GPT default. It deliberately does not answer:
 
 - target disk;
@@ -604,6 +607,13 @@ skip both interactive user-password prompts without exposing plaintext to
 debconf. It does not hide the resulting hash from an operator who can inspect
 the ISO/initrd or an installed machine's protected shadow database.
 
+`netcfg/enable=false` disables all Debian Installer network configuration.
+The image installs its reviewed root filesystem directly from the ISO and does
+not require DHCP, Wi-Fi scanning, DNS, or an APT mirror. This also prevents the
+legacy `netcfg` scanner from exercising recent Intel WLAN firmware during
+installation. NetworkManager owns networking only after the installed system
+boots; OOBE subsequently replaces the image's temporary hostname.
+
 `partman/early_command` refuses installation when `/sys/firmware/efi` is
 absent. Bootloader configuration is UEFI-only, so this is a second guard.
 
@@ -613,6 +623,7 @@ The installer flow is:
 UEFI boot
   -> graphical Debian Installer
   -> reviewed locale/time defaults
+  -> installer network configuration skipped
   -> injected crypt(3) hash creates localadmin without a password prompt
   -> operator selects disk and partitioning/encryption
   -> operator confirms destructive write
@@ -732,6 +743,15 @@ root-owned package-generated file; any other object aborts the build.
 background database I/O and metadata retention on the 4 GiB sensitive
 workstation baseline. Dolphin browsing remains available, but indexed
 full-content search is intentionally not promised.
+
+### 14.6 Explicit no-Recommends runtime closure
+
+Because APT Recommends are disabled, EDBP explicitly installs `console-setup`
+for Live keyboard application, `rtkit` for PipeWire scheduling, `upower` for
+PowerDevil battery/power state, `sonnet6-plugins` for Kate spellchecking,
+`kf6-breeze-icon-theme` for the Plasma icon set, and `lsof` for Dolphin's
+open-file diagnostics. Their absence is a release failure, not an acceptable
+minimal-image tradeoff.
 
 ---
 
@@ -954,6 +974,8 @@ Acceptance:
 - `/preseed.cfg` contains exactly one `$y$` or `$6$`
   `passwd/user-password-crypted` record, contains no plaintext-password
   record, and contains no unresolved template token;
+- `/preseed.cfg` contains exactly `d-i netcfg/enable boolean false` and no
+  other `netcfg/*` question;
 - no SSH private key exists anywhere in the ISO.
 
 ### 18.3 UEFI VM boot
@@ -984,14 +1006,15 @@ For NVMe-emulated and SATA-emulated disks, verify:
 
 1. no BIOS boot path;
 2. installer English locale and Damascus timezone defaults;
-3. no localadmin or root password prompt appears;
+3. no network-interface, DHCP, Wi-Fi, localadmin, or root password prompt appears;
 4. disk and recipe selection remain interactive;
 5. final destructive confirmation appears;
 6. GPT and EFI System Partition are created for guided UEFI installation;
 7. installed system boots without ISO;
-8. the controlled shared password authenticates `localadmin` locally and
+8. NetworkManager discovers networking only after installed boot;
+9. the controlled shared password authenticates `localadmin` locally and
    satisfies password-required `sudo`;
-9. OOBE blocks SDDM until completion.
+10. OOBE blocks SDDM until completion.
 
 ### 18.5 Installed-system checks
 

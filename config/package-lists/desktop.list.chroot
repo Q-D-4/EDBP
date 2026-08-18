@@ -10,9 +10,11 @@ kscreen
 plasma-nm
 plasma-pa
 powerdevil
+upower
 systemsettings
 xdg-desktop-portal-kde
 kio-extras
+kf6-breeze-icon-theme
 
 # Minimal end-user shell.
 dolphin
@@ -23,6 +25,8 @@ bzip2
 unzip
 zip
 kate
+lsof
+sonnet6-plugins
 
 # Network and audio backends. Do not use pipewire-audio: that metapackage has
 # a hard dependency on libspa-0.2-bluetooth in Debian 13.
@@ -33,3 +37,4 @@ pipewire
 pipewire-pulse
 pipewire-alsa
 wireplumber
+rtkit
