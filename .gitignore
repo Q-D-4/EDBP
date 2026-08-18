@@ -25,6 +25,8 @@ config/package-lists/live.list.chroot
 *.packages
 *.zsync
 binary.modified_timestamps
+chroot.packages.install
+chroot.packages.live
 *.log
 build.log
 SHA256SUMS

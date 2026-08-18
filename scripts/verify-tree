@@ -47,7 +47,7 @@ version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
 
 if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
     && [[ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]]; then
-    fail 'tracked source tree is dirty; commit reviewed changes before a production build'
+    fail 'source tree is dirty (tracked or untracked); commit reviewed changes and remove build debris before a production build'
 fi
 
 sh -n auto/config
@@ -213,6 +213,23 @@ for source_list in config/archives/*.list.chroot config/archives/*.list.binary; 
     fi
 done
 
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.chroot.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser.list.chroot \
+    || fail 'Brave build source does not reference the live-build chroot key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.binary.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser-release.list.binary \
+    || fail 'Brave installed source does not reference the live-build binary key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.chroot.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.chroot \
+    || fail 'Element build source does not reference the live-build chroot key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.binary.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.binary \
+    || fail 'Element installed source does not reference the live-build binary key'
+
 python3 - <<'PY'
 import pathlib
 import xml.etree.ElementTree as ET
@@ -231,8 +248,16 @@ printf '%s  %s\n' \
     config/archives/brave-browser.key.chroot \
     | sha256sum --check --strict >/dev/null
 printf '%s  %s\n' \
+    c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788 \
+    config/archives/brave-browser.key.binary \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
     c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
     config/archives/element-io.key.chroot \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
+    config/archives/element-io.key.binary \
     | sha256sum --check --strict >/dev/null
 printf '%s  %s\n' \
     04f5ff6be56fe60acd6b7ee031832b41e8671ae09c42ba141b91da04f0e0114a \

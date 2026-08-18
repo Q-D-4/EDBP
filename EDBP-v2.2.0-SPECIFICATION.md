@@ -141,9 +141,11 @@ EDBP/
 │   ├── archives/
 │   │   ├── 00-edbp-trust-scope.conf
 │   │   ├── brave-browser-release.list.binary
+│   │   ├── brave-browser.key.binary
 │   │   ├── brave-browser.key.chroot
 │   │   ├── brave-browser.list.chroot
 │   │   ├── brave-browser.pref
+│   │   ├── element-io.key.binary
 │   │   ├── element-io.key.chroot
 │   │   ├── element-io.list.binary
 │   │   ├── element-io.list.chroot
@@ -268,13 +270,21 @@ This supports a future local APT mirror without changing tracked source.
 | Brave | `brave-browser.list.chroot` | `brave-browser-release.list.binary` | `brave-browser`, `brave-keyring` |
 | Element | `element-io.list.chroot` | `element-io.list.binary` | `element-desktop`, `element-io-archive-keyring` |
 
-Every vendor source uses `Signed-By`. Although live-build stages
-`*.key.chroot` under `trusted.gpg.d`, `00-edbp-trust-scope.conf` excludes that
-directory from global trust: only Debian's archive keyring and administrator
-keyrings under `/etc/apt/keyrings` are globally eligible. Vendor keys remain
-usable solely through their explicit source paths. Pin files first allow only
-the reviewed package names at priority 500 and then assign priority `-1` to
-every other package from that origin. Nightly/beta packages are not eligible.
+Every vendor source uses `Signed-By`. `live-build` uses two distinct archive
+passes: `*.key.chroot` authenticates package installation, while
+`*.key.binary` remains available when it replaces build sources with installed
+`*.list.binary` sources and performs its final APT index refresh. Both key
+classes are staged under `trusted.gpg.d`, but `00-edbp-trust-scope.conf`
+excludes that directory from global trust: only Debian's archive keyring and
+administrator keyrings under `/etc/apt/keyrings` are globally eligible. Vendor
+keys therefore remain usable solely through their explicit source paths.
+
+The duplicate binary key inputs are deliberate. A chroot-only key is removed
+at the archive transition before `apt update`; pointing the installed source
+only at an after-packages keyring can therefore fail during `live-build`'s
+transition itself. Pin files first allow only the reviewed package names at
+priority 500 and then assign priority `-1` to every other package from that
+origin. Nightly/beta packages are not eligible.
 
 ### 6.2 Keyring checksums
 

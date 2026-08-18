@@ -211,6 +211,8 @@ clean:
 		"$(PACKAGES)" \
 		"$(MANIFEST)" \
 		"$(BUILD_INPUTS)" \
+		chroot.packages.install \
+		chroot.packages.live \
 		SHA256SUMS \
 		build.log
 	@rm -f -- \
