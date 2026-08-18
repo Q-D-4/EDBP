@@ -1,0 +1,9 @@
+{
+  "KPlugin": {
+    "Id": "EDBP",
+    "Name": "EDBP Green",
+    "Description": "EDBP institutional desktop background",
+    "License": "Proprietary"
+  },
+  "X-KDE-PlasmaImageWallpaper-AccentColor": "#00695f"
+}

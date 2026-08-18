@@ -2,7 +2,7 @@
 
 set -eu
 
-# brave-keyring is a hard dependency of brave-browser. During package install,
+# brave-keyring is a hard dependency of brave-origin. During package install,
 # only the build-time brave-browser.list source exists, so its postinst creates
 # a globally trusted compatibility symlink. The final image uses the vendor's
 # recognized brave-browser-release.list name, but that source is installed only
@@ -23,5 +23,35 @@ if [ -L "${legacy_trust}" ]; then
 elif [ -e "${legacy_trust}" ]; then
     printf '%s\n' \
         "ERROR: refusing to remove unexpected Brave global trust object" >&2
+    exit 1
+fi
+
+# Brave Origin 1.93.x currently creates a second Deb822 source that targets
+# Google's Chrome repository and signs it with /usr/share/keyrings/brave-origin.gpg.
+# EDBP installs Origin from the reviewed Brave repository, so retaining that
+# additional source would expand APT trust and package ownership beyond the
+# approved boundary. Accept and remove only the exact vendor-generated shape;
+# abort if the object has drifted or contains administrator content.
+origin_source=/etc/apt/sources.list.d/brave-origin.sources
+origin_key=/usr/share/keyrings/brave-origin.gpg
+
+if [ -f "${origin_source}" ] && [ ! -L "${origin_source}" ]; then
+    grep -Fqx 'Types: deb' "${origin_source}" \
+        && grep -Fqx 'URIs: https://dl.google.com/linux/chrome-stable/deb/' "${origin_source}" \
+        && grep -Fqx 'Suites: stable' "${origin_source}" \
+        && grep -Fqx 'Components: main' "${origin_source}" \
+        && grep -Fqx 'Architectures: amd64' "${origin_source}" \
+        && grep -Fqx 'Signed-By: /usr/share/keyrings/brave-origin.gpg' "${origin_source}" \
+        || { printf '%s\n' 'ERROR: unexpected Brave Origin APT source' >&2; exit 1; }
+    rm -f -- "${origin_source}"
+elif [ -e "${origin_source}" ] || [ -L "${origin_source}" ]; then
+    printf '%s\n' 'ERROR: refusing to remove unexpected Brave Origin source object' >&2
+    exit 1
+fi
+
+if [ -f "${origin_key}" ] && [ ! -L "${origin_key}" ]; then
+    rm -f -- "${origin_key}"
+elif [ -e "${origin_key}" ] || [ -L "${origin_key}" ]; then
+    printf '%s\n' 'ERROR: refusing to remove unexpected Brave Origin key object' >&2
     exit 1
 fi

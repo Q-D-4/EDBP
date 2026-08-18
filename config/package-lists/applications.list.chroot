@@ -1,6 +1,6 @@
 # Kept separate from productivity: these packages have different trust and
 # update ownership. Brave and Element come from pinned vendor repositories.
-brave-browser
+brave-origin
 element-desktop
 element-io-archive-keyring
 

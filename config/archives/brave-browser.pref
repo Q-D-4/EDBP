@@ -1,5 +1,5 @@
 # Fail closed: this repository may supply only the packages EDBP reviewed.
-Package: brave-browser brave-keyring
+Package: brave-origin brave-keyring
 Pin: release o=Brave Software
 Pin-Priority: 500
 
