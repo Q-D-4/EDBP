@@ -58,6 +58,8 @@ validate_mirror_url EDBP_RUNTIME_SECURITY_MIRROR "${EDBP_RUNTIME_SECURITY_MIRROR
 # noauto prevents lb from recursively invoking this script. The caller's
 # arguments are appended last so CI or an operator can make an explicit,
 # one-build override without weakening the repository defaults silently.
+# Recommended packages are disabled; operationally required recommendations
+# are promoted into explicit package lists to prevent BlueDevil and bloat.
 lb config noauto \
     --ignore-system-defaults \
     --mode debian \
@@ -79,7 +81,7 @@ lb config noauto \
     --updates true \
     --backports false \
     --apt-secure true \
-    --apt-recommends true \
+    --apt-recommends false \
     --apt-source-archives false \
     --mirror-bootstrap "${EDBP_BUILD_MIRROR}" \
     --mirror-chroot "${EDBP_BUILD_MIRROR}" \

@@ -1,0 +1,5 @@
+# Allow local administrators to inspect devices and change device authorization
+# (including usbguard allow-device) without granting arbitrary policy rewrites.
+Devices=modify,list,listen
+Policy=list
+Exceptions=listen

@@ -1,0 +1,35 @@
+# Plasma 6 workspace: no task-kde-desktop/kde-standard metapackages.
+plasma-desktop
+sddm
+sddm-theme-breeze
+xserver-xorg
+
+# Explicitly promoted from Plasma recommendations because APT recommends are
+# globally disabled for reproducibility and to prevent BlueDevil/bloat.
+kscreen
+plasma-nm
+plasma-pa
+powerdevil
+systemsettings
+xdg-desktop-portal-kde
+kio-extras
+
+# Minimal end-user shell.
+dolphin
+konsole
+ark
+7zip
+bzip2
+unzip
+zip
+kate
+
+# Network and audio backends. Do not use pipewire-audio: that metapackage has
+# a hard dependency on libspa-0.2-bluetooth in Debian 13.
+network-manager
+wpasupplicant
+wireless-regdb
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
