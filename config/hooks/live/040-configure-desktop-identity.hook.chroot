@@ -40,9 +40,11 @@ chmod 0644 \
     /etc/default/keyboard \
     /etc/locale.gen
 
-visudo --check --file "${sudoers_file}"
+/usr/sbin/visudo --check --file "${sudoers_file}"
 bash -n "${oobe_script}"
-systemd-analyze verify edbp-oobe.service sddm.service
+# Keep structural/dependency verification while intentionally skipping
+# Documentation=man: lookups.  The production image omits man-db/manpages.
+systemd-analyze verify --man=no edbp-oobe.service sddm.service
 grep -Fqx "Indexing-Enabled[\$i]=false" /etc/xdg/baloofilerc \
     || { printf '%s\n' 'ERROR: Baloo indexing policy is missing' >&2; exit 1; }
 

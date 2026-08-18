@@ -26,10 +26,20 @@ for command_name in \
     python3 \
     sha256sum \
     shellcheck \
-    ssh-keygen \
-    visudo; do
+    ssh-keygen; do
     require_command "${command_name}"
 done
+
+# Debian installs visudo in /usr/sbin.  Normal unprivileged login shells may
+# legitimately omit sbin directories from PATH, so resolve the canonical path
+# explicitly instead of requiring operators to mutate their environment.
+if command -v visudo >/dev/null 2>&1; then
+    visudo_command=$(command -v visudo)
+elif [[ -x /usr/sbin/visudo ]]; then
+    visudo_command=/usr/sbin/visudo
+else
+    fail 'required build-host command is missing: /usr/sbin/visudo (package: sudo)'
+fi
 
 version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
@@ -43,6 +53,11 @@ fi
 sh -n auto/config
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
+
+grep -Fqx \
+    'systemd-analyze verify --man=no edbp-oobe.service sddm.service' \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'desktop hook must suppress only unavailable manpage checks during unit verification'
 
 while IFS= read -r script; do
     sh -n "${script}"
@@ -174,7 +189,7 @@ grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
     "${rendered_preseed}" \
     || fail 'installer finalization command is missing'
 
-visudo --check --file \
+"${visudo_command}" --check --file \
     config/includes.chroot_after_packages/etc/sudoers.d/localadmin >/dev/null
 
 jq --exit-status . \

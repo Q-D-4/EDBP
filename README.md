@@ -22,7 +22,7 @@ sudo apt install live-build debootstrap squashfs-tools xorriso \
 install -d -m 0700 secrets
 ssh-keygen -t ed25519 -f secrets/edbp_admin -C edbp-admin
 cp secrets/edbp_admin.pub secrets/localadmin_authorized_keys
-mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+( umask 077; mkpasswd --method=yescrypt > secrets/localadmin_password_hash )
 chmod 0600 secrets/localadmin_authorized_keys \
     secrets/localadmin_password_hash
 

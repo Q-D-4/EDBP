@@ -35,7 +35,7 @@ trusted_parts=$(apt-config shell value Dir::Etc::TrustedParts | sed -n "s/^value
 
 /usr/sbin/nft --check --file /etc/nftables.conf
 /usr/bin/usbguard-rule-parser --file /etc/usbguard/rules.conf >/dev/null
-visudo --check --file /etc/sudoers.d/localadmin
+/usr/sbin/visudo --check --file /etc/sudoers.d/localadmin
 
 for forbidden_package in \
     bluez \

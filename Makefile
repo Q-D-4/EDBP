@@ -98,7 +98,8 @@ stage-build-inputs: verify
 	}
 
 config: stage-build-inputs
-	@if ! lb config; then \
+	@umask 022; \
+	if ! lb config; then \
 		$(MAKE) --no-print-directory scrub-build-inputs; \
 		rm -f -- "$(BUILD_INPUTS)"; \
 		exit 1; \
@@ -120,6 +121,7 @@ build: config
 	trap 'exit 129' HUP; \
 	trap 'exit 130' INT; \
 	trap 'exit 143' TERM; \
+	umask 022; \
 	printf '%s\n' '[EDBP] Building $(ISO)'; \
 	if (( EUID == 0 )); then lb build; else sudo lb build; fi \
 		2>&1 | tee build.log; \

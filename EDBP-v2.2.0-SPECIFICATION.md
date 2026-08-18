@@ -738,6 +738,12 @@ keys in each installed target.
 Hooks use `set -eu` and are executable. They must fail closed instead of
 silently repairing an unreviewed object.
 
+Hook `040` invokes `systemd-analyze verify --man=no`: dependency, executable,
+unit, and drop-in validation remain active, while only `Documentation=man:`
+existence checks are skipped. The minimal image intentionally omits manpages,
+so treating absent SDDM documentation as a service failure would be a false
+positive and installing `man-db` solely to satisfy that check would be bloat.
+
 ---
 
 ## 16. Service policy
@@ -788,8 +794,7 @@ ssh-keygen -t ed25519 -a 100 -f secrets/edbp_admin -C edbp-admin
 install -m 0600 secrets/edbp_admin.pub secrets/localadmin_authorized_keys
 
 # Prompts on the terminal; plaintext is not placed in argv or shell history.
-umask 077
-mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+( umask 077; mkpasswd --method=yescrypt > secrets/localadmin_password_hash )
 chmod 0600 secrets/localadmin_password_hash
 ```
 
@@ -849,6 +854,12 @@ policy. Neither provenance JSON file contains the password hash value.
 | `make verify-checksums` | Verify existing `SHA256SUMS` and manifest paths |
 | `make scrub-build-inputs` | Delete only generated preseed and staged authorized keys |
 | `make clean` | Purge live-build state and generated artifacts/staged inputs; preserve source secrets |
+
+`make config` and `make build` force a build-safe `umask 022`. Secret staging
+scripts independently enforce `umask 077`, and the password-generation example
+uses a subshell so a restrictive umask cannot leak into `live-build`. This keeps
+APT's `_apt` sandbox able to traverse its cache instead of falling back to an
+unsandboxed root download.
 
 Production build:
 
