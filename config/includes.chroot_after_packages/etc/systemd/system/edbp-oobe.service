@@ -1,0 +1,32 @@
+[Unit]
+Description=EDBP first-boot workstation provisioning
+Wants=dbus.service
+After=local-fs.target systemd-remount-fs.service dbus.service plymouth-quit.service
+Before=display-manager.service sddm.service
+Conflicts=getty@tty1.service
+ConditionPathExists=!/run/live/medium
+ConditionPathExists=!/var/lib/edbp/oobe-complete
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/bin/chvt 1
+ExecStart=/usr/local/sbin/edbp-oobe
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=TERM=linux
+TimeoutStartSec=infinity
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+
+[Install]
+WantedBy=graphical.target

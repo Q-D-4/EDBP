@@ -1,0 +1,10 @@
+[Layout]
+DisplayNames[$i]=,
+LayoutList[$i]=us,ara
+LayoutLoopCount[$i]=-1
+Model[$i]=pc105
+Options[$i]=grp:alt_shift_toggle
+ResetOldOptions[$i]=true
+SwitchMode[$i]=Global
+Use[$i]=true
+VariantList[$i]=,

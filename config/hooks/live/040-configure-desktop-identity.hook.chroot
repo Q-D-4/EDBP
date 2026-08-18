@@ -1,0 +1,147 @@
+#!/bin/sh
+
+set -eu
+
+sudoers_file=/etc/sudoers.d/localadmin
+oobe_script=/usr/local/sbin/edbp-oobe
+lo_policy=/etc/libreoffice/registry/edbp-defaults.xcd
+lo_registry_link=/usr/lib/libreoffice/share/registry/zz-edbp-defaults.xcd
+
+chown root:root \
+    "${sudoers_file}" \
+    "${oobe_script}" \
+    /etc/systemd/system/edbp-oobe.service \
+    /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
+    /etc/sddm.conf.d/hide-admin.conf \
+    /etc/brave/policies/managed/policies.json \
+    "${lo_policy}" \
+    /etc/xdg/kxkbrc \
+    /etc/xdg/plasma-localerc \
+    /etc/xdg/mimeapps.list \
+    /etc/locale.conf \
+    /etc/default/keyboard \
+    /etc/locale.gen
+
+chmod 0440 "${sudoers_file}"
+chmod 0755 "${oobe_script}"
+chmod 0644 \
+    /etc/systemd/system/edbp-oobe.service \
+    /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
+    /etc/sddm.conf.d/hide-admin.conf \
+    /etc/brave/policies/managed/policies.json \
+    "${lo_policy}" \
+    /etc/xdg/kxkbrc \
+    /etc/xdg/plasma-localerc \
+    /etc/xdg/mimeapps.list \
+    /etc/locale.conf \
+    /etc/default/keyboard \
+    /etc/locale.gen
+
+visudo --check --file "${sudoers_file}"
+bash -n "${oobe_script}"
+
+python3 - <<'PY'
+import json
+import pathlib
+import xml.etree.ElementTree as ET
+
+json_path = pathlib.Path('/etc/brave/policies/managed/policies.json')
+xml_path = pathlib.Path('/etc/libreoffice/registry/edbp-defaults.xcd')
+
+with json_path.open(encoding='utf-8') as stream:
+    brave_policy = json.load(stream)
+
+expected_brave_policy = {
+    'HomepageLocation': 'https://home.mofa.sy/',
+    'HomepageIsNewTabPage': False,
+    'ShowHomeButton': True,
+    'RestoreOnStartup': 4,
+    'RestoreOnStartupURLs': ['https://home.mofa.sy/'],
+    'NewTabPageLocation': 'https://home.mofa.sy/',
+    'DefaultSearchProviderEnabled': True,
+    'DefaultSearchProviderName': 'DuckDuckGo',
+    'DefaultSearchProviderKeyword': 'duckduckgo.com',
+    'DefaultSearchProviderSearchURL': 'https://duckduckgo.com/?q={searchTerms}',
+    'DefaultSearchProviderSuggestURL': 'https://duckduckgo.com/ac/?q={searchTerms}&type=list',
+}
+if brave_policy != expected_brave_policy:
+    raise SystemExit('Brave policy does not match the reviewed EDBP policy')
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+ns = {'oor': 'http://openoffice.org/2001/registry'}
+oor_name = '{http://openoffice.org/2001/registry}name'
+oor_package = '{http://openoffice.org/2001/registry}package'
+oor_finalized = '{http://openoffice.org/2001/registry}finalized'
+
+dependencies = root.findall('dependency')
+if len(dependencies) != 1 or dependencies[0].get('file') != 'main':
+    raise SystemExit('LibreOffice policy must depend exactly on main.xcd')
+
+components = {
+    (item.get(oor_package), item.get(oor_name)): item
+    for item in root.findall('oor:component-data', ns)
+}
+
+def locked_value(component_key, node_names, property_name):
+    node = components[component_key]
+    for node_name in node_names:
+        node = next(
+            child for child in node.findall('node')
+            if child.get(oor_name) == node_name
+        )
+    prop = next(
+        child for child in node.findall('prop')
+        if child.get(oor_name) == property_name
+    )
+    if prop.get(oor_finalized) != 'true':
+        raise SystemExit(f'LibreOffice property is not locked: {property_name}')
+    value = prop.find('value')
+    return '' if value is None or value.text is None else value.text
+
+toolbar = ('org.openoffice.Office.UI', 'ToolbarMode')
+setup = ('org.openoffice', 'Setup')
+expected_locked_values = {
+    (toolbar, (), 'ActiveWriter'): 'notebookbar.ui',
+    (toolbar, (), 'ActiveCalc'): 'notebookbar.ui',
+    (toolbar, (), 'ActiveImpress'): 'notebookbar.ui',
+    (toolbar, ('Applications', 'Writer'), 'Active'): 'Tabbed',
+    (toolbar, ('Applications', 'Calc'), 'Active'): 'Tabbed',
+    (toolbar, ('Applications', 'Impress'), 'Active'): 'Tabbed',
+    (setup, ('L10N',), 'ooLocale'): 'ar',
+    (setup, ('Office', 'Factories', 'com.sun.star.text.TextDocument'),
+     'ooSetupFactoryDefaultFilter'): 'Office Open XML Text',
+    (setup, ('Office', 'Factories', 'com.sun.star.sheet.SpreadsheetDocument'),
+     'ooSetupFactoryDefaultFilter'): 'Calc MS Excel 2007 XML',
+    (setup, ('Office', 'Factories', 'com.sun.star.presentation.PresentationDocument'),
+     'ooSetupFactoryDefaultFilter'): 'Impress MS PowerPoint 2007 XML',
+}
+for (component, nodes, prop), expected in expected_locked_values.items():
+    if locked_value(component, nodes, prop) != expected:
+        raise SystemExit(f'Unexpected LibreOffice policy value: {prop}')
+PY
+
+# Debian scans /usr/lib/libreoffice/share/registry, while /etc is the correct
+# administrator-owned location. Refuse to overwrite an unexpected object.
+if [ -L "${lo_registry_link}" ]; then
+    [ "$(readlink "${lo_registry_link}")" = "${lo_policy}" ] || {
+        printf '%s\n' 'ERROR: unexpected LibreOffice EDBP registry link target' >&2
+        exit 1
+    }
+elif [ -e "${lo_registry_link}" ]; then
+    printf '%s\n' 'ERROR: refusing to replace LibreOffice registry object' >&2
+    exit 1
+else
+    ln -s "${lo_policy}" "${lo_registry_link}"
+fi
+
+if [ ! -L /etc/default/locale ] \
+    || [ "$(readlink -f /etc/default/locale)" != /etc/locale.conf ]; then
+    printf '%s\n' 'ERROR: Debian locale compatibility link is missing or unexpected' >&2
+    exit 1
+fi
+
+locale-gen en_US.UTF-8 ar_SY.UTF-8
+update-locale LANG=en_US.UTF-8 LANGUAGE=en_US:en
+
+systemctl enable edbp-oobe.service
