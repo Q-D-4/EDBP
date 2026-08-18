@@ -27,9 +27,14 @@ config/package-lists/live.list.chroot
 binary.modified_timestamps
 *.log
 build.log
+SHA256SUMS
+edbp-*.manifest.json
+edbp-*.build-inputs.json
 
 # Secret Keys & Credentials (CRITICAL)
 secrets/
+config/includes.installer/localadmin_authorized_keys
+config/includes.installer/preseed.cfg
 *.pem
 *.key
 id_rsa

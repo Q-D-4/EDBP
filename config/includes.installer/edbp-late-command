@@ -1,0 +1,90 @@
+#!/bin/sh
+
+set -eu
+
+TARGET=/target
+ADMIN_USER=localadmin
+SOURCE_KEYS=/localadmin_authorized_keys
+
+fail() {
+    logger -t edbp-installer "ERROR: $1" || true
+    printf 'EDBP installer error: %s\n' "$1" >&2
+    exit 1
+}
+
+[ -d "${TARGET}/etc" ] || fail 'target filesystem is not mounted'
+[ -s "${SOURCE_KEYS}" ] || fail 'localadmin authorized_keys build input is missing'
+
+# live-build removes /etc/hosts after custom hooks so live-config can generate
+# the Live-session copy. Do not depend on that runtime overlay being copied by
+# live-installer: materialize deterministic regular target identity files here.
+for identity_file in hostname hosts; do
+    identity_path=${TARGET}/etc/${identity_file}
+    if [ -L "${identity_path}" ] \
+        || { [ -e "${identity_path}" ] && [ ! -f "${identity_path}" ]; }; then
+        fail "unexpected target identity object: /etc/${identity_file}"
+    fi
+done
+
+printf '%s\n' 'edbp-unconfigured' >"${TARGET}/etc/hostname"
+printf '%s\n' \
+    '127.0.0.1 localhost' \
+    '127.0.1.1 edbp-unconfigured' \
+    '' \
+    '::1 localhost ip6-localhost ip6-loopback' \
+    'ff02::1 ip6-allnodes' \
+    'ff02::2 ip6-allrouters' \
+    >"${TARGET}/etc/hosts"
+in-target chown root:root /etc/hostname /etc/hosts
+in-target chmod 0644 /etc/hostname /etc/hosts
+
+in-target id "${ADMIN_USER}" >/dev/null 2>&1 \
+    || fail 'Debian Installer did not create localadmin'
+
+in-target usermod -aG sudo "${ADMIN_USER}"
+
+admin_home=$(in-target getent passwd "${ADMIN_USER}" | awk -F: '{print $6}')
+[ "${admin_home}" = "/home/${ADMIN_USER}" ] \
+    || fail "unexpected localadmin home: ${admin_home}"
+
+admin_uid=$(in-target id -u "${ADMIN_USER}")
+admin_gid=$(in-target id -g "${ADMIN_USER}")
+
+in-target install -d \
+    -o "${admin_uid}" \
+    -g "${admin_gid}" \
+    -m 0700 \
+    "${admin_home}/.ssh"
+
+cp "${SOURCE_KEYS}" "${TARGET}${admin_home}/.ssh/authorized_keys"
+in-target chown \
+    "${admin_uid}:${admin_gid}" \
+    "${admin_home}/.ssh/authorized_keys"
+in-target chmod 0600 "${admin_home}/.ssh/authorized_keys"
+
+in-target ssh-keygen -l -f "${admin_home}/.ssh/authorized_keys" >/dev/null \
+    || fail 'installed localadmin authorized_keys is invalid'
+
+in-target visudo -cf /etc/sudoers.d/localadmin >/dev/null \
+    || fail 'installed localadmin sudo policy is invalid'
+
+# Never clone SSH host identity from the Live filesystem. Generate a fresh set
+# inside each installed target before ssh.service can start.
+rm -f "${TARGET}/etc/ssh"/ssh_host_*
+in-target ssh-keygen -A
+
+in-target install -d -o root -g root -m 0755 /var/lib/edbp
+rm -f "${TARGET}/var/lib/edbp/oobe-complete"
+
+for unit in \
+    ssh.service \
+    nftables.service \
+    usbguard.service \
+    edbp-oobe.service; do
+    in-target systemctl enable "${unit}" >/dev/null \
+        || fail "could not enable ${unit}"
+done
+
+sync
+logger -t edbp-installer 'Target identity and service finalization completed' \
+    || true

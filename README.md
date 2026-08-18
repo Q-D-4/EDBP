@@ -1,17 +1,42 @@
 # EDBP - Enterprise Debian Build Platform
 
-نظام بناء Debian مؤسسي مؤتمت.
+منصة بناء Debian 13 Trixie مؤسسية لمحطات عمل KDE، بآيزو UEFI هجين يحتوي
+Live environment وDebian Installer تفاعلياً آمناً.
 
-> **حالة المشروع:** الشجرة الحالية هندسية/تكاملية وليست Golden Master جاهزة
-> للنشر. ما زال Preseed الآمن، إنشاء `localadmin`، تشديد SSH، واختبار ISO الكامل
-> من موانع الإصدار.
+المصدر التنفيذي الوحيد للمعمارية وإجراءات البناء والقبول هو:
 
-الوثائق التنفيذية الحالية:
+- [EDBP v2.2.0 Specification](./EDBP-v2.2.0-SPECIFICATION.md)
 
-- [Repository gap analysis and execution order](./docs/repository-gap-analysis.md)
-- [Layer 02 — Repositories, packages, USBGuard, and nftables](./docs/layer-02-repositories-packages.md)
-- [Layer 03 — Desktop, identity, policies, and OOBE](./docs/layer-03-desktop-identity-oobe.md)
+الحالة الحالية هي **Release Candidate** وليست Golden Master تلقائياً. يلزم
+اجتياز بوابات P0 الموثقة، وأهمها بناء ISO فعلي، تثبيتان UEFI مستقلان، اختبار
+العتاد، واعتماد معالجة DHCP/multicast في ملف nftables.
 
-الملفان `EDBP-Implementation-Runbook-v2.0.1.md` و
-`EDBP-Implementation-Runbook-v2.1.0.md` محفوظان كمرجع تاريخي فقط؛ لا تنفذ
-أوامر التقسيم أو كلمات المرور البديلة الموجودة فيهما على أجهزة حقيقية.
+## Quick start
+
+```bash
+sudo apt install live-build debootstrap squashfs-tools xorriso \
+    grub-efi-amd64-bin shim-signed mtools dosfstools \
+    make git jq openssh-client sudo shellcheck \
+    debconf-utils python3 ca-certificates whois
+
+install -d -m 0700 secrets
+ssh-keygen -t ed25519 -f secrets/edbp_admin -C edbp-admin
+cp secrets/edbp_admin.pub secrets/localadmin_authorized_keys
+mkpasswd --method=yescrypt > secrets/localadmin_password_hash
+chmod 0600 secrets/localadmin_authorized_keys \
+    secrets/localadmin_password_hash
+
+make verify
+make all
+```
+
+لا تمرر كلمة المرور الصريحة كوسيط لسطر الأوامر. `mkpasswd` يطلبها تفاعلياً،
+والمشروع يقرأ فقط crypt(3) hash من الملف المحلي غير المتتبع. يُولّد
+`config/includes.installer/preseed.cfg` وقت البناء ثم يُحذف تلقائياً مع ملف
+المفتاح المرحلي بعد `lb build`.
+
+هذه آلية انتقالية وليست خزنة أسرار: الهاش مضمّن في initrd ويمكن استخراجه من
+الـISO ومحاولة كسره دون اتصال. كلمة واحدة لـ600 جهاز تعني أن كشفها على جهاز
+واحد يعرّض الأسطول كله؛ يجب تدويرها وإلغاء الاعتماد عليها فور اكتمال إدارة
+SSH. لفحص المصدر فقط دون ملف هاش حقيقي استخدم `make verify-test`؛ هذا الهدف
+لا يستطيع تشغيل `config` أو `build`.

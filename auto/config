@@ -3,7 +3,7 @@
 set -eu
 
 # Resolve project files independently of the caller's current directory.
-PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PROJECT_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION_FILE="${PROJECT_ROOT}/VERSION"
 
 if [ ! -r "${VERSION_FILE}" ]; then

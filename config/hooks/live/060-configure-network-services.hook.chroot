@@ -1,0 +1,64 @@
+#!/bin/sh
+
+set -eu
+
+ssh_policy=/etc/ssh/sshd_config.d/10-edbp-hardening.conf
+verify_dir=$(mktemp -d /run/edbp-sshd-check.XXXXXX)
+verify_host_key=${verify_dir}/ssh_host_ed25519_key
+
+cleanup()
+{
+    rm -f -- "${verify_host_key}" "${verify_host_key}.pub"
+    rmdir "${verify_dir}" 2>/dev/null || :
+}
+
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+
+chown root:root "${ssh_policy}"
+chmod 0644 "${ssh_policy}"
+
+# live-build's normal 8050 hook has already removed image-baked host keys.
+# Validate against an ephemeral key without reintroducing a shared key into
+# either the live filesystem or the subsequently installed system.
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "${verify_host_key}"
+/usr/sbin/sshd -t -o "HostKey=${verify_host_key}"
+
+effective_ssh=$(
+    /usr/sbin/sshd -T \
+        -o "HostKey=${verify_host_key}" \
+        -C user=localadmin,host=localhost,addr=127.0.0.1
+)
+
+for required_setting in \
+    'permitrootlogin no' \
+    'passwordauthentication no' \
+    'kbdinteractiveauthentication no' \
+    'pubkeyauthentication yes' \
+    'authenticationmethods publickey' \
+    'allowusers localadmin' \
+    'x11forwarding no' \
+    'allowagentforwarding no' \
+    'allowtcpforwarding no'; do
+    printf '%s\n' "${effective_ssh}" | grep -Fqx "${required_setting}" \
+        || { printf 'ERROR: ineffective SSH policy: %s\n' "${required_setting}" >&2; exit 1; }
+done
+
+for unit in \
+    ssh.service \
+    NetworkManager.service \
+    cups.service \
+    cups.socket \
+    cups-browsed.service \
+    avahi-daemon.service; do
+    systemctl enable "${unit}" >/dev/null \
+        || { printf 'ERROR: could not enable required unit: %s\n' "${unit}" >&2; exit 1; }
+done
+
+# Local scanning does not require a network-facing SANE server.
+for unit in saned.socket saned@.service; do
+    if [ -e "/usr/lib/systemd/system/${unit}" ] \
+        || [ -e "/lib/systemd/system/${unit}" ]; then
+        systemctl disable "${unit}" >/dev/null
+    fi
+done

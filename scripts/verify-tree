@@ -1,0 +1,260 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # Literal crypt(3) dollar markers are intentional.
+
+set -Eeuo pipefail
+
+PROJECT_ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${PROJECT_ROOT}"
+
+fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 \
+        || fail "required build-host command is missing: $1"
+}
+
+for command_name in \
+    awk \
+    bash \
+    debconf-set-selections \
+    git \
+    jq \
+    lb \
+    python3 \
+    sha256sum \
+    shellcheck \
+    ssh-keygen \
+    visudo; do
+    require_command "${command_name}"
+done
+
+version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || fail 'VERSION must be a semantic numeric version'
+
+if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
+    && [[ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]]; then
+    fail 'tracked source tree is dirty; commit reviewed changes before a production build'
+fi
+
+sh -n auto/config
+bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
+sh -n config/includes.installer/edbp-late-command
+
+while IFS= read -r script; do
+    sh -n "${script}"
+    [[ -x "${script}" ]] || fail "hook is not executable: ${script}"
+done < <(find config/hooks/live -maxdepth 1 -type f -name '*.hook.chroot' -print | sort)
+
+while IFS= read -r script; do
+    bash -n "${script}"
+    [[ -x "${script}" ]] || fail "script is not executable: ${script}"
+done < <(find scripts -maxdepth 1 -type f -print | sort)
+
+shellcheck -x --severity=style \
+    auto/config \
+    config/hooks/live/*.hook.chroot \
+    config/includes.installer/edbp-late-command \
+    config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
+    scripts/stage-admin-keys \
+    scripts/stage-localadmin-password \
+    scripts/verify-tree
+
+preseed_template=config/includes.installer/preseed.cfg.in
+preseed_staged=config/includes.installer/preseed.cfg
+
+[[ -f "${preseed_template}" && ! -L "${preseed_template}" ]] \
+    || fail 'tracked preseed template must be a regular non-symlink file'
+
+if git ls-files --error-unmatch "${preseed_staged}" >/dev/null 2>&1; then
+    fail 'generated secret-bearing preseed.cfg must not be tracked'
+fi
+
+if git ls-files --error-unmatch \
+    secrets/localadmin_password_hash >/dev/null 2>&1; then
+    fail 'localadmin password hash source must not be tracked'
+fi
+
+for ignored_path in \
+    secrets/localadmin_password_hash \
+    config/includes.installer/localadmin_authorized_keys \
+    "${preseed_staged}" \
+    "edbp-${version}-amd64.build-inputs.json"; do
+    git check-ignore --quiet "${ignored_path}" \
+        || fail "generated/secret path is not protected by .gitignore: ${ignored_path}"
+done
+
+grep -Fqx \
+    'd-i passwd/user-password-crypted password @@EDBP_LOCALADMIN_PASSWORD_HASH@@' \
+    "${preseed_template}" \
+    || fail 'preseed template does not contain the exact password-hash token line'
+
+validation_directory=$(mktemp -d)
+trap 'rm -rf -- "${validation_directory}"' EXIT
+
+admin_keys_file=${EDBP_ADMIN_KEYS_FILE:-secrets/localadmin_authorized_keys}
+./scripts/stage-admin-keys \
+    "${admin_keys_file}" \
+    "${validation_directory}/localadmin_authorized_keys" >/dev/null
+
+password_hash_file=${EDBP_LOCALADMIN_PASSWORD_HASH_FILE:-secrets/localadmin_password_hash}
+allow_test_hash=${EDBP_ALLOW_TEST_PASSWORD_HASH:-0}
+case "${allow_test_hash}" in
+    0|1)
+        ;;
+    *)
+        fail 'EDBP_ALLOW_TEST_PASSWORD_HASH must be either 0 or 1'
+        ;;
+esac
+
+if [[ ! -e "${password_hash_file}" \
+    && ! -L "${password_hash_file}" \
+    && "${allow_test_hash}" == 1 ]]; then
+    password_hash_file=${validation_directory}/synthetic-test-password-hash
+    test_checksum=$(printf '%086d' 0)
+    printf '$6$EDBPtest$%s\n' "${test_checksum}" >"${password_hash_file}"
+    chmod 0600 "${password_hash_file}"
+fi
+
+rendered_preseed=${validation_directory}/preseed.cfg
+./scripts/stage-localadmin-password \
+    "${password_hash_file}" \
+    "${preseed_template}" \
+    "${rendered_preseed}" >/dev/null
+
+debconf-set-selections --checkonly "${rendered_preseed}"
+
+for forbidden_question in \
+    'partman-auto/disk' \
+    'partman-auto/method' \
+    'partman/choose_partition' \
+    'passwd/user-password' \
+    'passwd/user-password-again' \
+    'passwd/root-password' \
+    'passwd/root-password-again' \
+    'passwd/root-password-crypted'; do
+    if awk -v question="${forbidden_question}" \
+        '$1 == "d-i" && $2 == question { found = 1 } END { exit !found }' \
+        "${rendered_preseed}"; then
+        fail "unsafe or secret-bearing preseed question found: ${forbidden_question}"
+    fi
+done
+
+if [[ $(awk \
+    '$1 == "d-i" && $2 == "passwd/user-password-crypted" && $3 == "password" { count += 1 } END { print count + 0 }' \
+    "${rendered_preseed}") != 1 ]]; then
+    fail 'rendered preseed must contain exactly one encrypted localadmin password record'
+fi
+
+grep -Eq \
+    '^d-i[[:space:]]+passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    "${rendered_preseed}" \
+    || fail 'rendered preseed does not contain an accepted crypt(3) hash'
+
+if grep -Fq '@@EDBP_LOCALADMIN_PASSWORD_HASH@@' "${rendered_preseed}"; then
+    fail 'password-hash token survived preseed rendering'
+fi
+
+if grep -E \
+    '^[[:space:]]*d-i[[:space:]]+partman[^[:space:]]*[[:space:]]+boolean[[:space:]]+true([[:space:]]|$)' \
+    "${rendered_preseed}" >/dev/null; then
+    fail 'partition confirmation must not be pre-answered true'
+fi
+
+grep -Fqx 'd-i passwd/username string localadmin' \
+    "${rendered_preseed}" \
+    || fail 'preseed does not create localadmin'
+grep -Fqx 'd-i passwd/root-login boolean false' \
+    "${rendered_preseed}" \
+    || fail 'root login is not disabled in preseed'
+grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
+    "${rendered_preseed}" \
+    || fail 'installer finalization command is missing'
+
+visudo --check --file \
+    config/includes.chroot_after_packages/etc/sudoers.d/localadmin >/dev/null
+
+jq --exit-status . \
+    config/includes.chroot_after_packages/etc/brave/policies/managed/policies.json \
+    >/dev/null
+
+grep -Fqx \
+    'Dir::Etc::Trusted "/usr/share/keyrings/debian-archive-keyring.gpg";' \
+    config/archives/00-edbp-trust-scope.conf \
+    || fail 'APT global trust is not scoped to the Debian archive keyring'
+grep -Fqx \
+    'Dir::Etc::TrustedParts "/etc/apt/keyrings";' \
+    config/archives/00-edbp-trust-scope.conf \
+    || fail 'APT trusted-parts scope is not restricted'
+
+for source_list in config/archives/*.list.chroot config/archives/*.list.binary; do
+    grep -Eq '^deb[[:space:]]+\[[^]]*signed-by=' "${source_list}" \
+        || fail "vendor source is missing Signed-By: ${source_list}"
+    if grep -Eqi 'trusted[[:space:]]*=[[:space:]]*yes' "${source_list}"; then
+        fail "vendor source bypasses signature verification: ${source_list}"
+    fi
+done
+
+python3 - <<'PY'
+import pathlib
+import xml.etree.ElementTree as ET
+
+path = pathlib.Path(
+    'config/includes.chroot_after_packages/etc/libreoffice/registry/'
+    'edbp-defaults.xcd'
+)
+root = ET.parse(path).getroot()
+if root.tag != '{http://openoffice.org/2001/registry}data':
+    raise SystemExit('ERROR: unexpected LibreOffice registry root')
+PY
+
+printf '%s  %s\n' \
+    c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788 \
+    config/archives/brave-browser.key.chroot \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
+    config/archives/element-io.key.chroot \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    04f5ff6be56fe60acd6b7ee031832b41e8671ae09c42ba141b91da04f0e0114a \
+    config/includes.chroot_after_packages/etc/nftables.conf \
+    | sha256sum --check --strict >/dev/null
+
+if git grep -nE \
+    'BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED|PRIVATE) PRIVATE KEY' -- .; then
+    fail 'private-key material detected in tracked content'
+fi
+
+if git ls-files --error-unmatch \
+    config/includes.installer/localadmin_authorized_keys >/dev/null 2>&1; then
+    fail 'generated localadmin authorized_keys must not be tracked'
+fi
+
+if git grep -nE \
+    'passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    -- .; then
+    fail 'a localadmin crypt(3) hash is present in tracked content'
+fi
+
+for forbidden_package in \
+    bluez \
+    bluedevil \
+    libspa-0.2-bluetooth \
+    task-kde-desktop \
+    kde-standard; do
+    if grep -R -x "${forbidden_package}" config/package-lists >/dev/null; then
+        fail "forbidden package appears in package lists: ${forbidden_package}"
+    fi
+done
+
+if grep -R -E \
+    '^[[:space:]]*(blacklist|install)[[:space:]]+(usb_storage|uas)([[:space:]]|$)' \
+    config/includes.chroot_after_packages/etc/modprobe.d; then
+    fail 'USB storage is blocked at kernel level instead of delegated to USBGuard'
+fi
+
+printf 'EDBP source verification passed for version %s.\n' "${version}"
