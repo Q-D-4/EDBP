@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:data xmlns:oor="http://openoffice.org/2001/registry">
+  <dependency file="main"/>
+
+  <oor:component-data oor:name="ToolbarMode" oor:package="org.openoffice.Office.UI">
+    <prop oor:name="ActiveWriter" oor:finalized="true">
+      <value>notebookbar.ui</value>
+    </prop>
+    <prop oor:name="ActiveCalc" oor:finalized="true">
+      <value>notebookbar.ui</value>
+    </prop>
+    <prop oor:name="ActiveImpress" oor:finalized="true">
+      <value>notebookbar.ui</value>
+    </prop>
+    <node oor:name="Applications">
+      <node oor:name="Writer">
+        <prop oor:name="Active" oor:finalized="true">
+          <value>Tabbed</value>
+        </prop>
+      </node>
+      <node oor:name="Calc">
+        <prop oor:name="Active" oor:finalized="true">
+          <value>Tabbed</value>
+        </prop>
+      </node>
+      <node oor:name="Impress">
+        <prop oor:name="Active" oor:finalized="true">
+          <value>Tabbed</value>
+        </prop>
+      </node>
+    </node>
+  </oor:component-data>
+
+  <oor:component-data oor:name="Setup" oor:package="org.openoffice">
+    <node oor:name="L10N">
+      <prop oor:name="ooLocale" oor:finalized="true">
+        <value>ar</value>
+      </prop>
+    </node>
+    <node oor:name="Office">
+      <node oor:name="Factories">
+        <node oor:name="com.sun.star.text.TextDocument">
+          <prop oor:name="ooSetupFactoryDefaultFilter" oor:finalized="true">
+            <value>Office Open XML Text</value>
+          </prop>
+        </node>
+        <node oor:name="com.sun.star.sheet.SpreadsheetDocument">
+          <prop oor:name="ooSetupFactoryDefaultFilter" oor:finalized="true">
+            <value>Calc MS Excel 2007 XML</value>
+          </prop>
+        </node>
+        <node oor:name="com.sun.star.presentation.PresentationDocument">
+          <prop oor:name="ooSetupFactoryDefaultFilter" oor:finalized="true">
+            <value>Impress MS PowerPoint 2007 XML</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </oor:component-data>
+</oor:data>

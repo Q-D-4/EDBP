@@ -7,7 +7,7 @@ the remaining release work:
 
 1. GitHub `origin/main` at `194a9b9` (`VERSION=2.2.0`).
 2. Local branch `feature/layer-02`, based exactly on that commit and containing
-   the reviewed layer-02 worktree changes.
+   the reviewed layer-02 and layer-03 worktree changes.
 3. The unimplemented layers required before an ISO can be released.
 
 ## 1. Repository state
@@ -45,6 +45,14 @@ the remaining release work:
 - Full Bluetooth module denial policy; no USB-storage kernel blacklist.
 - Explicit Live-session user, locale, and keyboard runtime dependencies while
   global APT recommendations remain disabled.
+- SDDM administrative-account hiding and password-authenticated sudo policy.
+- Condition-gated, rollback-capable TTY OOBE for hostname and an unprivileged
+  daily user, with SDDM blocked until successful completion.
+- Persistent English Plasma/SDDM locale and immutable `us,ara` KDE keyboard
+  policy with left/right Alt+Shift switching.
+- Managed Brave portal/startup/new-tab and DuckDuckGo policies.
+- Locked Arabic/Tabbed LibreOffice policy, OOXML default-save filters, and
+  Microsoft Office MIME defaults.
 - Dependency resolution simulation for all direct packages.
 
 ## 3. Completed integration prerequisite
@@ -79,20 +87,19 @@ interactive installer, disable SSH password authentication, and use public-key
 authentication remotely. Baking one password hash into an ISO for 600–6,000
 machines is not acceptable.
 
-### P0.2 — Identity, SSH, and first-boot OOBE
+### P0.2 — Installer identity and SSH remain incomplete
 
-None of the following exists:
+Layer 03 now supplies SDDM hiding, the sudoers rule, a pre-SDDM TTY OOBE,
+atomic completion marker, validation/rollback path, and a direct check that the
+daily user has no supplementary group. It deliberately does not manufacture an
+administrator with a baked-in credential.
 
-- `localadmin` creation contract;
-- SSH `sshd_config.d` hardening and key installation;
-- SDDM `HideUsers=localadmin` configuration;
-- one-time hostname and standard-user OOBE;
-- atomic completion marker, validation, rollback, and recovery path;
-- guarantee that the daily user is not in `sudo` or another privileged group.
+Still missing:
 
-The OOBE must run before SDDM. Otherwise hiding `localadmin` can leave a fresh
-machine with an empty login screen. A TTY/whiptail wizard is smaller and safer
-than a privileged graphical wizard; this is an explicit UX/security decision.
+- the installer contract that creates `localadmin`, adds it to `sudo`, and
+  obtains a unique credential;
+- SSH `sshd_config.d` hardening and public-key enrollment;
+- an automated recovery test for an interrupted/failed OOBE.
 
 OpenSSH host-key cloning is handled by the Debian Trixie live-build normal hook
 `8050-remove-openssh-server-host-keys.hook.chroot` and regeneration paths, but
@@ -128,33 +135,25 @@ No complete `lb build` result has been accepted. Missing acceptance tests:
 
 ### Desktop and localization
 
-- persistent `/etc/default/locale`, `locale.gen`, and `/etc/default/keyboard`;
-- KDE `us,ara` layout with left/right Alt+Shift for new users;
-- SDDM English locale and keyboard behavior;
+- Persistent locale/keyboard files and immutable KDE `us,ara` policy are now
+  implemented. They still require first-installed-boot testing under both
+  Plasma Wayland and SDDM.
 - approved wallpaper asset and Plasma defaults;
 - decision on Baloo indexing and KDE usage/feedback collection.
 
-Kernel boot parameters alone do not configure every installed KDE user.
-
 ### Brave
 
-`/etc/brave/policies/managed/policies.json` is absent. It must define the home
-button, startup URLs, and DuckDuckGo search provider. The portal URL scheme and
-trust chain are unresolved: if `home.mofa.sy` uses an internal HTTPS CA, that CA
-must be deployed system-wide; falling back silently to HTTP is not acceptable.
+The managed policy now defines the home button, process startup, new-tab URL,
+and DuckDuckGo provider. The portal is intentionally HTTPS. Its DNS, TLS
+certificate, policy recognition in `brave://policy`, and any internal CA trust
+deployment remain acceptance items.
 
 ### LibreOffice
 
-Missing:
-
-- Arabic UI selection;
-- Notebookbar/Tabbed interface selection;
-- DOCX/XLSX/PPTX default save formats;
-- Microsoft Office MIME associations;
-- a first-launch validation test using a clean user profile.
-
-Installing `libreoffice-l10n-ar` only makes Arabic available; it does not select
-Arabic or the Notebookbar automatically.
+Arabic UI, locked Notebookbar/Tabbed mode, DOCX/XLSX/PPTX defaults, and common
+Microsoft Office MIME associations are implemented. A first-launch validation
+test using a clean user profile remains mandatory, including a round-trip
+document compatibility test.
 
 ### Terminal history
 
@@ -211,9 +210,10 @@ disabled. Missing reviewed policy/configuration for:
 ## 7. Recommended execution order
 
 1. Commit and review the integrated layer-02 feature branch.
-2. Implement the partial interactive Preseed and identity contract.
-3. Implement SSH hardening, SDDM hiding, and the one-shot OOBE.
-4. Add persistent locale/keyboard, Brave, LibreOffice, MIME, and KDE policies.
+2. Implement the partial interactive Preseed, `localadmin` creation contract,
+   and unique SSH-key enrollment.
+3. Test the layer-03 OOBE and desktop policies on an installed VM.
+4. Implement SSH hardening.
 5. Review and harden the daemon/service layer.
 6. Add build validation, UEFI/QEMU tests, manifests, checksums, and release
    provenance.

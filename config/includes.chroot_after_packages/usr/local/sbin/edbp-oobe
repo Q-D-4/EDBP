@@ -1,0 +1,327 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+readonly MARKER=/var/lib/edbp/oobe-complete
+readonly ADMIN_USER=localadmin
+readonly TITLE='EDBP First-Boot Setup'
+
+work_dir=''
+marker_tmp=''
+marker_installed=0
+created_user=''
+state_changed=0
+completed=0
+old_hostname=''
+new_hostname=''
+new_username=''
+password=''
+
+log_message() {
+    printf '%s\n' "$*" | systemd-cat --identifier=edbp-oobe || true
+}
+
+show_error() {
+    whiptail --title "${TITLE}" --msgbox "$1" 10 72 || true
+}
+
+fatal() {
+    log_message "ERROR: $1"
+    if command -v whiptail >/dev/null 2>&1 && [[ -t 0 ]]; then
+        show_error "$1"
+    else
+        printf 'ERROR: %s\n' "$1" >&2
+    fi
+    exit 1
+}
+
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    set +e
+
+    password=''
+
+    if (( completed == 0 )); then
+        if (( marker_installed == 1 )); then
+            rm -f -- "${MARKER}"
+        fi
+
+        if (( state_changed == 1 )) && [[ -n "${work_dir}" ]]; then
+            log_message 'Provisioning failed; restoring the previous hostname files.'
+            cp -a -- "${work_dir}/hostname" /etc/hostname || true
+            cp -a -- "${work_dir}/hosts" /etc/hosts || true
+            if [[ -n "${old_hostname}" ]]; then
+                hostnamectl hostname "${old_hostname}" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if [[ -n "${created_user}" ]]; then
+            log_message "Provisioning failed; removing the incomplete standard account ${created_user}."
+            userdel --remove "${created_user}" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [[ -n "${marker_tmp}" ]]; then
+        rm -f -- "${marker_tmp}"
+    fi
+
+    if [[ -n "${work_dir}" ]]; then
+        rm -f -- \
+            "${work_dir}/hostname" \
+            "${work_dir}/hosts" \
+            "${work_dir}/hostname.new" \
+            "${work_dir}/hosts.new"
+        rmdir -- "${work_dir}" >/dev/null 2>&1 || true
+    fi
+
+    exit "${rc}"
+}
+
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+validate_hostname() {
+    local candidate=$1
+    (( ${#candidate} >= 1 && ${#candidate} <= 63 )) || return 1
+    [[ "${candidate}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+validate_username() {
+    local candidate=$1
+    [[ "${candidate}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || return 1
+    getent passwd "${candidate}" >/dev/null 2>&1 && return 1
+    getent group "${candidate}" >/dev/null 2>&1 && return 1
+    return 0
+}
+
+render_hosts() {
+    local hostname=$1
+
+    awk -v hostname="${hostname}" '
+        BEGIN { replaced = 0 }
+        /^[[:space:]]*127[.]0[.]1[.]1([[:space:]]|$)/ {
+            if (!replaced) {
+                print "127.0.1.1\t" hostname
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                print "127.0.1.1\t" hostname
+            }
+        }
+    '
+}
+
+prompt_hostname() {
+    local candidate
+
+    while :; do
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --inputbox \
+            'Enter a unique host name (lowercase letters, digits, and hyphens only):' \
+            11 72 "${old_hostname}" \
+            3>&1 1>&2 2>&3)
+
+        if validate_hostname "${candidate}"; then
+            new_hostname=${candidate}
+            return
+        fi
+
+        show_error 'Invalid host name. Use 1-63 lowercase letters, digits, or hyphens; a hyphen cannot be first or last.'
+    done
+}
+
+prompt_username() {
+    local candidate
+
+    while :; do
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --inputbox \
+            'Enter the daily standard-user name. This account will not receive sudo privileges:' \
+            12 72 \
+            3>&1 1>&2 2>&3)
+
+        if validate_username "${candidate}"; then
+            new_username=${candidate}
+            return
+        fi
+
+        show_error 'Invalid or already-used name. Start with a lowercase letter; then use at most 31 lowercase letters, digits, underscores, or hyphens.'
+    done
+}
+
+prompt_password() {
+    local candidate confirmation
+
+    while :; do
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --passwordbox \
+            'Enter a password of at least 12 characters for the standard user:' \
+            11 72 \
+            3>&1 1>&2 2>&3)
+
+        if (( ${#candidate} < 12 || ${#candidate} > 128 )); then
+            show_error 'The password must contain between 12 and 128 characters.'
+            continue
+        fi
+
+        if [[ "${candidate}" == *:* ]]; then
+            show_error 'The colon character is not accepted by this provisioning workflow.'
+            continue
+        fi
+
+        if [[ "${candidate}" == "${new_username}" ]]; then
+            show_error 'The password must not equal the user name.'
+            continue
+        fi
+
+        confirmation=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --passwordbox \
+            'Re-enter the password:' \
+            10 72 \
+            3>&1 1>&2 2>&3)
+
+        if [[ "${candidate}" == "${confirmation}" ]]; then
+            password=${candidate}
+            return
+        fi
+
+        candidate=''
+        confirmation=''
+        show_error 'The two passwords did not match.'
+    done
+}
+
+if (( EUID != 0 )); then
+    fatal 'This program must run as root.'
+fi
+
+# The unit has matching conditions, but the script also protects manual runs.
+[[ -e /run/live/medium ]] && exit 0
+[[ -e "${MARKER}" ]] && exit 0
+
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+for required_command in \
+    awk chpasswd cp date getent hostnamectl id install mktemp mv rmdir \
+    sync systemctl systemd-cat useradd userdel whiptail; do
+    command -v "${required_command}" >/dev/null 2>&1 \
+        || fatal "Required command is missing: ${required_command}"
+done
+
+[[ -f /etc/hostname && ! -L /etc/hostname ]] \
+    || fatal '/etc/hostname must be an existing regular file.'
+[[ -f /etc/hosts && ! -L /etc/hosts ]] \
+    || fatal '/etc/hosts must be an existing regular file.'
+[[ -f /etc/sudoers.d/localadmin ]] \
+    || fatal 'The localadmin sudo policy is missing. Repair the installation before continuing.'
+
+id "${ADMIN_USER}" >/dev/null 2>&1 \
+    || fatal 'The installer did not create localadmin. OOBE stopped to avoid an unmanaged workstation.'
+
+if [[ " $(id -nG "${ADMIN_USER}") " != *' sudo '* ]]; then
+    fatal 'localadmin is not a member of sudo. This also prevents the approved USBGuard IPC delegation.'
+fi
+
+old_hostname=$(< /etc/hostname)
+[[ -n "${old_hostname}" ]] || fatal '/etc/hostname is empty.'
+
+while :; do
+    prompt_hostname
+    prompt_username
+    prompt_password
+
+    if whiptail \
+        --title "${TITLE}" \
+        --yes-button Create \
+        --no-button Back \
+        --yesno \
+        "Host name: ${new_hostname}\nStandard user: ${new_username}\n\nCreate this unprivileged account and finish setup?" \
+        13 72; then
+        break
+    fi
+
+    password=''
+done
+
+work_dir=$(mktemp -d /run/edbp-oobe.XXXXXX)
+cp -a -- /etc/hostname "${work_dir}/hostname"
+cp -a -- /etc/hosts "${work_dir}/hosts"
+
+printf '%s\n' "${new_hostname}" >"${work_dir}/hostname.new"
+render_hosts "${new_hostname}" </etc/hosts >"${work_dir}/hosts.new"
+
+useradd \
+    --create-home \
+    --user-group \
+    --shell /bin/bash \
+    --comment '' \
+    "${new_username}"
+created_user=${new_username}
+
+printf '%s:%s\n' "${new_username}" "${password}" | chpasswd
+password=''
+
+# No supplementary groups are granted. In particular, the account is not in
+# sudo; desktop device access is delegated by logind/Polkit and service policy.
+primary_gid=$(id -g "${new_username}")
+read -r -a account_gids <<<"$(id -G "${new_username}")"
+for account_gid in "${account_gids[@]}"; do
+    [[ "${account_gid}" == "${primary_gid}" ]] \
+        || fatal 'The standard account unexpectedly received a supplementary group.'
+done
+
+state_changed=1
+install -o root -g root -m 0644 "${work_dir}/hostname.new" /etc/hostname
+install -o root -g root -m 0644 "${work_dir}/hosts.new" /etc/hosts
+hostnamectl hostname "${new_hostname}"
+
+# Make the account and hostname state durable before committing the marker.
+sync
+
+install -d -o root -g root -m 0755 /var/lib/edbp
+marker_tmp=$(mktemp /var/lib/edbp/.oobe-complete.XXXXXX)
+{
+    printf 'EDBP_OOBE_VERSION=1\n'
+    printf 'COMPLETED_AT=%s\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+} >"${marker_tmp}"
+chmod 0644 "${marker_tmp}"
+
+# Ignore catchable termination signals only across the marker rename/fsync
+# commit window. SIGKILL cannot run cleanup, but the already durable account and
+# hostname plus the atomic marker still describe a complete transaction.
+trap '' HUP INT TERM
+mv -- "${marker_tmp}" "${MARKER}"
+marker_tmp=''
+marker_installed=1
+if ! sync -f /var/lib/edbp; then
+    trap 'exit 1' HUP INT TERM
+    fatal 'The OOBE completion marker could not be synchronized to disk.'
+fi
+completed=1
+trap 'exit 1' HUP INT TERM
+
+# Disabling removes the normal boot enablement. The completion marker is the
+# authoritative guard because sddm.service also pulls this unit as a dependency.
+systemctl disable edbp-oobe.service >/dev/null 2>&1 \
+    || log_message 'WARNING: completion marker written, but disabling edbp-oobe.service failed.'
+
+log_message "Provisioning completed for host ${new_hostname}; standard account ${new_username} created."
+whiptail \
+    --title "${TITLE}" \
+    --msgbox \
+    'Setup completed successfully. The graphical sign-in screen will start now.' \
+    10 72 || true
