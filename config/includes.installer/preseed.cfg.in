@@ -36,7 +36,10 @@ d-i user-setup/allow-password-weak boolean false
 
 ### Package source policy
 # The installation must succeed from the ISO without external APT traffic.
+# The Live filesystem already contains the complete target.  The ISO is not a
+# Debian package disc and must never be retained as an apt-cdrom source.
 d-i apt-setup/use_mirror boolean false
+d-i apt-setup/disable-cdrom-entries boolean true
 
 ### Partitioning safety and UEFI
 # Only the preferred label is seeded. Deliberately absent:
@@ -49,7 +52,7 @@ d-i apt-setup/use_mirror boolean false
 # destructive confirmation as interactive installer steps.
 d-i partman-partitioning/choose_label select gpt
 d-i partman-partitioning/default_label string gpt
-d-i partman/early_command string if [ ! -d /sys/firmware/efi ]; then logger -t edbp-installer "UEFI firmware interface is absent; refusing installation"; exit 1; fi
+d-i partman/early_command string /bin/sh /edbp-partman-policy
 
 ### Boot loader
 d-i grub-installer/only_debian boolean true

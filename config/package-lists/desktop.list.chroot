@@ -16,6 +16,11 @@ xdg-desktop-portal-kde
 kio-extras
 kf6-breeze-icon-theme
 
+# Plasma recommends this PAM bridge, but Recommends are disabled globally.
+# SDDM's Debian PAM profile already contains optional pam_kwallet5 hooks; the
+# explicit package makes those hooks functional and unlocks KWallet at login.
+libpam-kwallet5
+
 # Minimal end-user shell.
 dolphin
 konsole

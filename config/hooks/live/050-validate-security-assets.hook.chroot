@@ -37,6 +37,9 @@ check_sha256 \
 dpkg-query -W -f='${Status}\n' brave-origin 2>/dev/null \
     | grep -qx 'install ok installed' \
     || { printf '%s\n' 'ERROR: Brave Origin is not installed' >&2; exit 1; }
+dpkg-query -W -f='${Status}\n' libpam-kwallet5 2>/dev/null \
+    | grep -qx 'install ok installed' \
+    || { printf '%s\n' 'ERROR: KWallet PAM integration is not installed' >&2; exit 1; }
 if dpkg-query -W -f='${Status}\n' brave-browser 2>/dev/null \
     | grep -qx 'install ok installed'; then
     printf '%s\n' 'ERROR: legacy full Brave package is installed' >&2
@@ -49,6 +52,18 @@ trusted_parts=$(apt-config shell value Dir::Etc::TrustedParts | sed -n "s/^value
     || { printf '%s\n' 'ERROR: APT global keyring scope drifted' >&2; exit 1; }
 [ "${trusted_parts}" = /etc/apt/keyrings ] \
     || { printf '%s\n' 'ERROR: APT trusted-parts scope drifted' >&2; exit 1; }
+
+debian_sources=/etc/apt/sources.list.d/debian.sources
+for required_source_record in \
+    'URIs: https://deb.debian.org/debian/' \
+    'Suites: trixie trixie-updates' \
+    'URIs: https://security.debian.org/debian-security/' \
+    'Suites: trixie-security' \
+    'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; do
+    grep -Fqx "${required_source_record}" "${debian_sources}" \
+        || { printf 'ERROR: Debian APT source is incomplete: %s\n' \
+            "${required_source_record}" >&2; exit 1; }
+done
 
 /usr/sbin/nft --check --file /etc/nftables.conf
 /usr/bin/usbguard-rule-parser --file /etc/usbguard/rules.conf >/dev/null

@@ -53,6 +53,16 @@ fi
 sh -n auto/config
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
+sh -n config/includes.installer/edbp-partman-policy
+sh -n config/includes.installer/usr/lib/apt-setup/generators/40cdrom
+
+for installer_script in \
+    config/includes.installer/edbp-late-command \
+    config/includes.installer/edbp-partman-policy \
+    config/includes.installer/usr/lib/apt-setup/generators/40cdrom; do
+    [[ -x "${installer_script}" ]] \
+        || fail "installer script is not executable: ${installer_script}"
+done
 
 grep -Fqx \
     'systemd-analyze verify --man=no edbp-oobe.service sddm.service' \
@@ -195,6 +205,25 @@ if awk '$1 == "d-i" && $2 ~ /^netcfg\// && $2 != "netcfg\/enable" { found = 1 } 
     "${rendered_preseed}"; then
     fail 'installer contains network questions despite the offline deployment policy'
 fi
+grep -Fqx 'd-i apt-setup/use_mirror boolean false' \
+    "${rendered_preseed}" \
+    || fail 'installer mirror use must be disabled for offline deployment'
+grep -Fqx 'd-i apt-setup/disable-cdrom-entries boolean true' \
+    "${rendered_preseed}" \
+    || fail 'installer must not retain the hybrid ISO as an APT source'
+grep -Fqx 'd-i partman/early_command string /bin/sh /edbp-partman-policy' \
+    "${rendered_preseed}" \
+    || fail 'installer storage policy command is missing'
+
+grep -Fqx ': > "$1"' \
+    config/includes.installer/usr/lib/apt-setup/generators/40cdrom \
+    || fail 'installer apt-cdrom generator is not a no-op output fragment'
+grep -Fq 'TYPE=linux_raid_member' \
+    config/includes.installer/edbp-partman-policy \
+    || fail 'installer storage policy does not reject existing MD metadata'
+grep -Fqx ': > /var/lib/partman/md' \
+    config/includes.installer/edbp-partman-policy \
+    || fail 'installer storage policy does not suppress unsupported MD probing'
 
 "${visudo_command}" --check --file \
     config/includes.chroot_after_packages/etc/sudoers.d/localadmin >/dev/null
@@ -288,6 +317,7 @@ fi
 for required_runtime_package in \
     console-setup \
     kf6-breeze-icon-theme \
+    libpam-kwallet5 \
     lsof \
     rtkit \
     sonnet6-plugins \
@@ -295,6 +325,17 @@ for required_runtime_package in \
     if ! grep -R -x "${required_runtime_package}" config/package-lists >/dev/null; then
         fail "required no-Recommends runtime package is missing: ${required_runtime_package}"
     fi
+done
+
+debian_sources=config/includes.chroot_after_packages/etc/apt/sources.list.d/debian.sources
+for required_source_record in \
+    'URIs: https://deb.debian.org/debian/' \
+    'Suites: trixie trixie-updates' \
+    'URIs: https://security.debian.org/debian-security/' \
+    'Suites: trixie-security' \
+    'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; do
+    grep -Fqx "${required_source_record}" "${debian_sources}" \
+        || fail "installed Debian APT source is incomplete: ${required_source_record}"
 done
 
 grep -Fq 'hplip_autostart=/etc/xdg/autostart/hplip-systray.desktop' \

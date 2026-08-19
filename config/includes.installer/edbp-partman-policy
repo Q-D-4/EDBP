@@ -1,0 +1,36 @@
+#!/bin/sh
+
+set -eu
+
+fail() {
+    logger -t edbp-installer "ERROR: $1" || true
+    printf 'EDBP storage policy error: %s\n' "$1" >&2
+    exit 1
+}
+
+# EDBP is UEFI-only.  Refuse to enter partitioning when the firmware interface
+# is absent instead of allowing a target that cannot satisfy the boot policy.
+[ -d /sys/firmware/efi ] \
+    || fail 'UEFI firmware interface is absent; installation refused'
+
+# Software RAID is outside the v2.2.0 workstation baseline.  The reduced
+# Debian Installer initrd therefore does not carry the version-coupled
+# md-modules-*-amd64-di udeb.  Fail closed if an existing RAID member is found
+# so that suppressing partman-md probing cannot expose array members as normal
+# disks and destroy an existing array.
+command -v blkid >/dev/null 2>&1 \
+    || fail 'blkid is unavailable; existing RAID metadata cannot be excluded'
+
+raid_members=$(blkid -t TYPE=linux_raid_member -o device 2>/dev/null || true)
+if [ -n "${raid_members}" ]; then
+    fail 'Linux software RAID metadata detected; this image does not support MD installation'
+fi
+
+# partman-md checks this sentinel before trying to load md-mod.  Mark probing
+# complete only after the raw-signature safety check above.  This removes the
+# misleading nomd dialog during ordinary single-disk/LVM installations.
+mkdir -p /var/lib/partman
+: > /var/lib/partman/md
+
+logger -t edbp-installer \
+    'UEFI and non-RAID storage policy checks passed' || true

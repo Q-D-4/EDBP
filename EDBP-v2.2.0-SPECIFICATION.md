@@ -159,9 +159,12 @@ EDBP/
 │   │       └── 090-clean-image.hook.chroot
 │   ├── includes.installer/
 │   │   ├── edbp-late-command
-│   │   └── preseed.cfg.in
+│   │   ├── edbp-partman-policy
+│   │   ├── preseed.cfg.in
+│   │   └── usr/lib/apt-setup/generators/40cdrom
 │   ├── includes.chroot_after_packages/
 │   │   ├── etc/
+│   │   │   ├── apt/sources.list.d/debian.sources
 │   │   │   ├── brave-origin/policies/managed/policies.json
 │   │   │   ├── default/keyboard
 │   │   │   ├── libreoffice/registry/edbp-defaults.xcd
@@ -269,7 +272,7 @@ This supports a future local APT mirror without changing tracked source.
 
 | Repository | Build source | Installed source | Eligible packages |
 |---|---|---|---|
-| Debian | `auto/config` mirrors | generated Debian sources | Debian archive packages |
+| Debian | `auto/config` mirrors | `etc/apt/sources.list.d/debian.sources` | Debian archive packages |
 | Brave | `brave-browser.list.chroot` | `brave-browser-release.list.binary` | `brave-origin`, `brave-keyring` |
 | Element | `element-io.list.chroot` | `element-io.list.binary` | `element-desktop`, `element-io-archive-keyring` |
 
@@ -320,7 +323,7 @@ by the workstation role is promoted into a tracked package list.
 | Function | Explicit packages |
 |---|---|
 | Plasma/SDDM | `plasma-desktop`, `sddm`, `sddm-theme-breeze`, `xserver-xorg` |
-| Plasma operations | `kscreen`, `plasma-nm`, `plasma-pa`, `powerdevil`, `upower`, `systemsettings`, `xdg-desktop-portal-kde`, `kio-extras`, `kf6-breeze-icon-theme` |
+| Plasma operations | `kscreen`, `plasma-nm`, `plasma-pa`, `powerdevil`, `upower`, `systemsettings`, `xdg-desktop-portal-kde`, `kio-extras`, `kf6-breeze-icon-theme`, `libpam-kwallet5` |
 | User shell | `dolphin`, `konsole`, `ark`, `kate`, `lsof`, `sonnet6-plugins`, `7zip`, `bzip2`, `unzip`, `zip` |
 | Network | `network-manager`, `wpasupplicant`, `wireless-regdb` |
 | Audio | `pipewire`, `pipewire-pulse`, `pipewire-alsa`, `wireplumber`, `rtkit` |
@@ -328,6 +331,12 @@ by the workstation role is promoted into a tracked package list.
 `task-kde-desktop`, `kde-standard`, Discover, games, PIM, Welcome, BlueDevil,
 and `pipewire-audio` are excluded. `pipewire-audio` would hard-depend on the
 Bluetooth SPA plugin in Debian 13.
+
+`libpam-kwallet5` is promoted from Plasma's Recommends because global
+`--apt-recommends false` would otherwise leave SDDM's existing optional
+`pam_kwallet5` hooks without their module. The installed-user wallet is then
+unlocked by the SDDM login password. KWallet is not globally disabled: doing so
+would weaken credential storage for NetworkManager and KDE applications.
 
 ### 7.2 Productivity and fonts
 
@@ -614,8 +623,25 @@ legacy `netcfg` scanner from exercising recent Intel WLAN firmware during
 installation. NetworkManager owns networking only after the installed system
 boots; OOBE subsequently replaces the image's temporary hostname.
 
-`partman/early_command` refuses installation when `/sys/firmware/efi` is
-absent. Bootloader configuration is UEFI-only, so this is a second guard.
+APT mirror use is disabled during installation. The stock `40cdrom` generator
+is replaced inside the installer initrd by a contract-compatible empty
+generator because this Live hybrid ISO is not a Debian package disc. The
+complete SquashFS is copied to the target; no packages are fetched from the
+medium. `apt-setup/disable-cdrom-entries=true` prevents a removable-media entry
+from surviving, while a tracked Deb822 `debian.sources` file provides the
+official Debian and security repositories after installation.
+
+`partman/early_command` invokes `/edbp-partman-policy`. It refuses installation
+when `/sys/firmware/efi` is absent. Software RAID is not supported in the
+v2.2.0 workstation baseline: the reduced installer initrd intentionally does
+not embed the version-coupled `md-modules-*-amd64-di` udeb. The policy scans raw
+block devices for `linux_raid_member` metadata and fails closed if any member
+is found. Only after that check does it create `/var/lib/partman/md`, causing
+`partman-md` to skip its unavailable-module probe and eliminating the
+misleading RAID dialog during normal single-disk/LVM installation. Adding MD
+support later requires matching installer kernel udebs and a separate RAID
+destruction/recovery acceptance plan; it must not be enabled by a blind
+`modprobe` workaround.
 
 The installer flow is:
 
@@ -624,10 +650,12 @@ UEFI boot
   -> graphical Debian Installer
   -> reviewed locale/time defaults
   -> installer network configuration skipped
+  -> UEFI/non-RAID storage policy checked
   -> injected crypt(3) hash creates localadmin without a password prompt
   -> operator selects disk and partitioning/encryption
   -> operator confirms destructive write
   -> Live filesystem copied to /target
+  -> apt-cdrom skipped; tracked Debian sources retained
   -> deterministic regular /etc/hostname and /etc/hosts materialized
   -> edbp-late-command validates localadmin and sudo
   -> public authorized_keys installed
@@ -976,6 +1004,10 @@ Acceptance:
   record, and contains no unresolved template token;
 - `/preseed.cfg` contains exactly `d-i netcfg/enable boolean false` and no
   other `netcfg/*` question;
+- `/preseed.cfg` disables mirror and cdrom APT sources during installation and
+  invokes `/edbp-partman-policy`;
+- installer initrd contains executable `/edbp-partman-policy` and the EDBP
+  `40cdrom` no-op generator;
 - no SSH private key exists anywhere in the ISO.
 
 ### 18.3 UEFI VM boot
@@ -1007,14 +1039,19 @@ For NVMe-emulated and SATA-emulated disks, verify:
 1. no BIOS boot path;
 2. installer English locale and Damascus timezone defaults;
 3. no network-interface, DHCP, Wi-Fi, localadmin, or root password prompt appears;
-4. disk and recipe selection remain interactive;
-5. final destructive confirmation appears;
-6. GPT and EFI System Partition are created for guided UEFI installation;
-7. installed system boots without ISO;
-8. NetworkManager discovers networking only after installed boot;
-9. the controlled shared password authenticates `localadmin` locally and
+4. no software-RAID-unavailable or APT-media-configuration dialog appears on
+   ordinary non-RAID disks;
+5. disk and recipe selection remain interactive;
+6. final destructive confirmation appears;
+7. GPT and EFI System Partition are created for guided UEFI installation;
+8. installed system boots without ISO;
+9. NetworkManager discovers networking only after installed boot;
+10. the controlled shared password authenticates `localadmin` locally and
    satisfies password-required `sudo`;
-10. OOBE blocks SDDM until completion.
+11. OOBE blocks SDDM until completion;
+12. `apt-get update` reaches Debian, Debian Security, Brave, and Element after
+    nftables is intentionally disabled on a connected acceptance machine;
+13. an SDDM password login unlocks KWallet without a second password prompt.
 
 ### 18.5 Installed-system checks
 
@@ -1148,6 +1185,9 @@ the same approved fleet management key.
 ## 21. Authoritative upstream references
 
 - [Debian Live Manual: customizing Debian Installer](https://live-team.pages.debian.net/live-manual/html/live-manual/customizing-installer.en.html)
+- [Debian Trixie apt-setup `40cdrom` generator](https://sources.debian.org/src/apt-setup/1%3A0.198/generators/40cdrom)
+- [Debian Trixie partman-md module probe](https://sources.debian.org/src/partman-md/114/init.d/md-devices)
+- [Debian Trixie `libpam-kwallet5`](https://packages.debian.org/trixie/amd64/libpam-kwallet5)
 - [Debian 13 Installer Manual: loading preseed](https://www.debian.org/releases/trixie/amd64/apbs02.en.html)
 - [Debian 13 Installer Manual: preseed contents](https://www.debian.org/releases/trixie/amd64/apbs04.en.html)
 - [Debian Trixie `live-build` manpages](https://manpages.debian.org/trixie/live-build/)
