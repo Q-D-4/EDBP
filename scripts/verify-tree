@@ -201,7 +201,7 @@ grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
 grep -Fqx 'd-i netcfg/enable boolean false' \
     "${rendered_preseed}" \
     || fail 'installer network configuration must be disabled for offline deployment'
-if awk '$1 == "d-i" && $2 ~ /^netcfg\// && $2 != "netcfg\/enable" { found = 1 } END { exit !found }' \
+if awk '$1 == "d-i" && $2 ~ /^netcfg\// && $2 != "netcfg/enable" { found = 1 } END { exit !found }' \
     "${rendered_preseed}"; then
     fail 'installer contains network questions despite the offline deployment policy'
 fi
