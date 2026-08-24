@@ -1,0 +1,47 @@
+#!/bin/sh
+
+set -eu
+
+tag=edbp-apt-media-policy
+generator=/usr/lib/apt-setup/generators/40cdrom
+
+# This hook runs from live-installer after anna/udpkg has loaded installer
+# components and immediately before main-menu advances to apt-setup.  Ensure
+# the owning udeb has installed its payload before replacing that payload; a
+# build-time initrd override would otherwise be overwritten by the udeb.
+if [ ! -f "$generator" ]; then
+    logger -t "$tag" \
+        '40cdrom is absent after component loading; installing apt-cdrom-setup'
+    anna-install apt-cdrom-setup
+fi
+
+if [ ! -f "$generator" ]; then
+    logger -t "$tag" \
+        'ERROR: apt-cdrom-setup did not provide the 40cdrom generator'
+    exit 1
+fi
+
+tmp="${generator}.edbp.$$"
+trap 'rm -f "$tmp"' 0 1 2 15
+
+cat >"$tmp" <<'EOF'
+#!/bin/sh
+
+set -eu
+
+# The reviewed system is copied from the Live SquashFS.  The hybrid ISO is not
+# a Debian package disc, so apt-setup must emit no cdrom source fragment.
+logger -t edbp-apt-media-policy \
+    'Skipping apt-cdrom scan for Live SquashFS installation'
+[ "$#" -eq 1 ]
+: > "$1"
+EOF
+
+chmod 0755 "$tmp"
+mv -f "$tmp" "$generator"
+trap - 0 1 2 15
+
+logger -t "$tag" \
+    'Installed Live-aware 40cdrom policy after apt-cdrom-setup loading'
+
+exit 0
