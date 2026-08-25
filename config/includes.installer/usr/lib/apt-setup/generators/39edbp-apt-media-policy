@@ -1,0 +1,94 @@
+#!/bin/sh
+
+set -u
+
+tag=edbp-apt-media-policy
+generator_dir=/usr/lib/apt-setup/generators
+target="${generator_dir}/40cdrom"
+tmp=
+
+log_error() {
+    logger -t "$tag" "ERROR: $*" || :
+}
+
+# shellcheck disable=SC2329  # Invoked through the EXIT trap.
+cleanup() {
+    if [ -n "$tmp" ]; then
+        rm -f "$tmp" || :
+    fi
+}
+
+fail_closed() {
+    log_error "$*"
+    exit 10
+}
+
+if [ "$#" -ne 1 ]; then
+    fail_closed 'expected one apt-setup output-fragment argument'
+fi
+
+if [ ! -d "$generator_dir" ] || [ -L "$generator_dir" ]; then
+    fail_closed 'apt-setup generator directory is unavailable or unsafe'
+fi
+
+# If apt-cdrom-setup is not the selected apt-mirror-setup provider, there is
+# no media generator to suppress and no later anna phase inside apt-setup can
+# add one.
+if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    logger -t "$tag" '40cdrom is absent; no Live media generator to disable' || :
+    exit 0
+fi
+
+if [ ! -f "$target" ] || [ -L "$target" ] || [ ! -x "$target" ]; then
+    fail_closed 'existing 40cdrom generator is not a safe executable file'
+fi
+
+uid=$(id -u 2>/dev/null) || fail_closed 'cannot determine installer identity'
+if [ "$uid" != 0 ]; then
+    fail_closed 'apt media policy must run as root in Debian Installer'
+fi
+
+trap cleanup 0
+trap 'exit 10' 1 2 15
+
+if ! tmp=$(mktemp "${generator_dir}/.40cdrom.edbp.XXXXXX"); then
+    fail_closed 'cannot create replacement beside 40cdrom'
+fi
+if [ ! -f "$tmp" ] || [ -L "$tmp" ]; then
+    fail_closed 'replacement temporary file is unsafe'
+fi
+
+if ! cat >"$tmp" <<'EOF'
+#!/bin/sh
+
+set -u
+
+# Debian Live Installer copies the reviewed SquashFS; the hybrid ISO is not an
+# APT package disc.  Emit no source fragment and do not scan the Live medium.
+if [ "$#" -ne 1 ]; then
+    logger -t edbp-apt-media-policy \
+        'ERROR: replacement 40cdrom expected one output-fragment argument' || :
+    exit 10
+fi
+
+logger -t edbp-apt-media-policy \
+    'Skipping apt-cdrom scan for Live SquashFS installation' || :
+exit 0
+EOF
+then
+    fail_closed 'cannot write replacement 40cdrom generator'
+fi
+
+chown 0:0 "$tmp" \
+    || fail_closed 'cannot preserve root ownership on replacement 40cdrom'
+chmod 0755 "$tmp" \
+    || fail_closed 'cannot preserve executable mode on replacement 40cdrom'
+mv -f "$tmp" "$target" \
+    || fail_closed 'cannot atomically replace 40cdrom generator'
+
+tmp=
+trap - 0 1 2 15
+
+logger -t "$tag" \
+    'Replaced 40cdrom immediately before apt-setup media processing' || :
+exit 0

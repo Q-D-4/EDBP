@@ -54,12 +54,12 @@ sh -n auto/config
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
-sh -n config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy
+sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
 
 for installer_script in \
     config/includes.installer/edbp-late-command \
     config/includes.installer/edbp-partman-policy \
-    config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy; do
+    config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy; do
     [[ -x "${installer_script}" ]] \
         || fail "installer script is not executable: ${installer_script}"
 done
@@ -83,7 +83,7 @@ shellcheck -x --severity=style \
     auto/config \
     config/hooks/live/*.hook.chroot \
     config/includes.installer/edbp-late-command \
-    config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy \
+    config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
@@ -217,24 +217,44 @@ grep -Fqx 'd-i partman/early_command string /bin/sh /edbp-partman-policy' \
     || fail 'installer storage policy command is missing'
 
 obsolete_apt_media_override=config/includes.installer/usr/lib/apt-setup/generators/40cdrom
-apt_media_policy_hook=config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy
+obsolete_apt_media_hook=config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy
+apt_media_policy_generator=config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
 
 if [[ -e "${obsolete_apt_media_override}" \
     || -L "${obsolete_apt_media_override}" ]]; then
     fail 'obsolete build-time apt-cdrom override must not remain in the installer initrd'
 fi
-grep -Fqx 'generator=/usr/lib/apt-setup/generators/40cdrom' \
-    "${apt_media_policy_hook}" \
-    || fail 'installer apt media policy does not target the runtime 40cdrom generator'
-grep -Fqx '    anna-install apt-cdrom-setup' \
-    "${apt_media_policy_hook}" \
-    || fail 'installer apt media policy does not establish the owning udeb lifecycle'
-grep -Fqx 'mv -f "$tmp" "$generator"' \
-    "${apt_media_policy_hook}" \
-    || fail 'installer apt media policy is not applied after component loading'
-grep -Fqx ': > "$1"' \
-    "${apt_media_policy_hook}" \
-    || fail 'runtime apt-cdrom generator is not a no-op output fragment'
+if [[ -e "${obsolete_apt_media_hook}" \
+    || -L "${obsolete_apt_media_hook}" ]]; then
+    fail 'obsolete post-base-installer apt media hook must not remain'
+fi
+if grep -R -Fq 'anna-install apt-cdrom-setup' config/includes.installer; then
+    fail 'installer must not depend on anna timing for apt media policy'
+fi
+grep -Fqx 'generator_dir=/usr/lib/apt-setup/generators' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy is not scoped to the apt-setup generator directory'
+grep -Fqx 'target="${generator_dir}/40cdrom"' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not target Debian 40cdrom'
+grep -Fqx 'if ! tmp=$(mktemp "${generator_dir}/.40cdrom.edbp.XXXXXX"); then' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy replacement is not created atomically beside 40cdrom'
+grep -Fq 'chown 0:0 "$tmp"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not preserve root ownership'
+grep -Fq 'chmod 0755 "$tmp"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not preserve executable mode'
+grep -Fq 'mv -f "$tmp" "$target"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom is not installed with an atomic rename'
+grep -Fqx '    exit 10' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not fail closed on invalid invocation'
+if grep -Fq '/target' "${apt_media_policy_generator}"; then
+    fail 'apt media policy must not modify the installed target directly'
+fi
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'
