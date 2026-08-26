@@ -1,0 +1,87 @@
+#!/bin/sh
+
+set -eu
+
+bashrc=${1:-/etc/bash.bashrc}
+profile=${2:-/etc/profile}
+policy_file=${3:-/etc/profile.d/99-edbp-session-history.sh}
+policy_source=/etc/profile.d/99-edbp-session-history.sh
+begin='# BEGIN EDBP SESSION-ONLY BASH HISTORY'
+end='# END EDBP SESSION-ONLY BASH HISTORY'
+temporary=''
+
+fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    exit 1
+}
+
+regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+# cleanup is invoked indirectly by the trap below; ShellCheck cannot model
+# that callback path.
+# shellcheck disable=SC2317
+cleanup() {
+    [ -z "${temporary}" ] || rm -f -- "${temporary}"
+}
+
+trap cleanup 0
+
+regular_file "${bashrc}" \
+    || fail "Debian system Bash configuration is missing or unsafe: ${bashrc}"
+regular_file "${profile}" \
+    || fail "Debian system login profile is missing or unsafe: ${profile}"
+regular_file "${policy_file}" \
+    || fail "EDBP Bash history policy is missing or unsafe: ${policy_file}"
+
+grep -Fqx '# System-wide .bashrc file for interactive bash(1) shells.' \
+    "${bashrc}" \
+    || fail 'Debian /etc/bash.bashrc header differs from the reviewed layout'
+# This is a literal signature from Debian's Bash configuration.
+# shellcheck disable=SC2016
+grep -Fqx '[ -z "${PS1-}" ] && return' "${bashrc}" \
+    || fail 'Debian /etc/bash.bashrc interactive guard is incompatible'
+grep -Fq '. /etc/bash.bashrc' "${profile}" \
+    || fail 'Debian /etc/profile does not cover interactive login Bash'
+grep -Fq 'for i in /etc/profile.d/*.sh; do' "${profile}" \
+    || fail 'Debian /etc/profile does not source profile.d policy files'
+
+grep -Fqx '        HISTFILE=/dev/null' "${policy_file}" \
+    || fail 'EDBP Bash history policy does not select /dev/null'
+grep -Fqx '    HISTSIZE=1000' "${policy_file}" \
+    || fail 'EDBP Bash in-memory history size is not the reviewed value'
+grep -Fqx '    readonly HISTFILE' "${policy_file}" \
+    || fail 'EDBP Bash history file policy is not enforced readonly'
+
+begin_count=$(grep -Fxc "${begin}" "${bashrc}" || true)
+end_count=$(grep -Fxc "${end}" "${bashrc}" || true)
+if [ "${begin_count}" -eq 1 ] && [ "${end_count}" -eq 1 ]; then
+    grep -Fqx "if [ -r ${policy_source} ]; then" "${bashrc}" \
+        || fail 'existing EDBP Bash history stanza is incompatible'
+    grep -Fqx "    . ${policy_source}" "${bashrc}" \
+        || fail 'existing EDBP Bash history source is incompatible'
+    exit 0
+fi
+if [ "${begin_count}" -ne 0 ] || [ "${end_count}" -ne 0 ]; then
+    fail 'partial EDBP Bash history stanza found'
+fi
+
+temporary=$(mktemp "${bashrc}.edbp.XXXXXX")
+{
+    cat -- "${bashrc}"
+    printf '\n%s\n' "${begin}"
+    printf 'if [ -r %s ]; then\n' "${policy_source}"
+    printf '    . %s\n' "${policy_source}"
+    printf 'fi\n%s\n' "${end}"
+} >"${temporary}"
+
+chown --reference="${bashrc}" "${temporary}"
+chmod --reference="${bashrc}" "${temporary}"
+mv -f -- "${temporary}" "${bashrc}"
+temporary=''
+
+grep -Fqx "if [ -r ${policy_source} ]; then" "${bashrc}" \
+    || fail 'ordinary interactive Bash does not source EDBP history policy'
+grep -Fqx "    . ${policy_source}" "${bashrc}" \
+    || fail 'EDBP Bash history policy source was not materialized'

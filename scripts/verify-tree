@@ -51,11 +51,13 @@ if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
 fi
 
 sh -n auto/config
+sh -n config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
 sh -n config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-bash-session-history-policy
 bash -n tests/test-finish-install-diagnostic
 bash -n tests/test-in-target-stdout-policy
 bash -n tests/test-oobe-hostname-policy
@@ -95,10 +97,12 @@ shellcheck -x --severity=style \
     config/includes.installer/edbp-late-command \
     config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
+    config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
+    tests/test-bash-session-history-policy \
     tests/test-finish-install-diagnostic \
     tests/test-in-target-stdout-policy \
     tests/test-oobe-hostname-policy \
@@ -299,6 +303,7 @@ if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
 ./tests/test-in-target-stdout-policy
+./tests/test-bash-session-history-policy
 ./tests/test-oobe-hostname-policy
 ./tests/test-oobe-username-policy
 ./tests/test-offline-apt-setup-policy
@@ -347,6 +352,22 @@ grep -Fq \
     || fail 'reviewed Plasma launcher default is incomplete'
 if grep -R -x 'plasma-discover' config/package-lists >/dev/null; then
     fail 'Discover must not be installed to satisfy an unwanted launcher'
+fi
+
+bash_history_policy=config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
+bash_history_hook=config/hooks/live/046-configure-bash-session-history.hook.chroot
+grep -Fqx '        HISTFILE=/dev/null' "${bash_history_policy}" \
+    || fail 'Bash history is not redirected away from persistent storage'
+grep -Fqx '    HISTSIZE=1000' "${bash_history_policy}" \
+    || fail 'Bash in-memory session history is not enabled'
+grep -Fqx '    readonly HISTFILE' "${bash_history_policy}" \
+    || fail 'user startup files can override the Bash persistence policy'
+grep -Fq '/etc/bash.bashrc' "${bash_history_hook}" \
+    || fail 'ordinary non-login Bash shells are not covered'
+if grep -REn \
+    'HISTSIZE=0|HISTFILESIZE=0|history[[:space:]]+-c|chattr' \
+    "${bash_history_policy}" "${bash_history_hook}" >/dev/null; then
+    fail 'Bash history policy disables memory or uses a filesystem workaround'
 fi
 
 finish_trace_installer=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace

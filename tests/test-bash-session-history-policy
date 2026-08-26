@@ -1,0 +1,92 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # Fixture commands expand in the child Bash.
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: Bash session-history regression: %s\n' "$1" >&2
+    exit 1
+}
+
+hook=config/hooks/live/046-configure-bash-session-history.hook.chroot
+policy=config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+bashrc=${test_directory}/bash.bashrc
+profile=${test_directory}/profile
+printf '%s\n' \
+    '# System-wide .bashrc file for interactive bash(1) shells.' \
+    '' \
+    '# If not running interactively, do not do anything' \
+    '[ -z "${PS1-}" ] && return' \
+    'shopt -s checkwinsize' >"${bashrc}"
+printf '%s\n' \
+    'if [ "${PS1-}" ]; then' \
+    '    . /etc/bash.bashrc' \
+    'fi' \
+    'for i in /etc/profile.d/*.sh; do' \
+    '    [ ! -r "$i" ] || . "$i"' \
+    'done' >"${profile}"
+
+"${hook}" "${bashrc}" "${profile}" "${policy}"
+"${hook}" "${bashrc}" "${profile}" "${policy}"
+[[ $(grep -Fxc '# BEGIN EDBP SESSION-ONLY BASH HISTORY' "${bashrc}") -eq 1 ]] \
+    || fail 'non-login Bash policy source is missing or duplicated'
+
+home=${test_directory}/home
+mkdir -p "${home}"
+printf '%s\n' 'echo EDBP_OLD_DISK_HISTORY_MARKER' >"${home}/.bash_history"
+printf '%s\n' \
+    'HISTFILE="$HOME/.bash_history"' \
+    'HISTSIZE=1000' >"${home}/.bashrc"
+
+runtime_rc=${test_directory}/runtime.bashrc
+sed "s|/etc/profile.d/99-edbp-session-history.sh|${project_root}/${policy}|g" \
+    "${bashrc}" >"${runtime_rc}"
+printf '%s\n' '[ ! -r "$HOME/.bashrc" ] || . "$HOME/.bashrc"' \
+    >>"${runtime_rc}"
+
+first_output=${test_directory}/first.out
+printf '%s\n' \
+    'printf "HISTFILE=%s\\n" "$HISTFILE"' \
+    'printf "HISTSIZE=%s\\n" "$HISTSIZE"' \
+    ': EDBP_SESSION_ONE_MARKER' \
+    'history' \
+    'exit' | HOME="${home}" bash --noprofile --rcfile "${runtime_rc}" -i \
+        >"${first_output}" 2>/dev/null
+
+grep -Fqx 'HISTFILE=/dev/null' "${first_output}" \
+    || fail 'interactive non-login Bash did not enforce HISTFILE=/dev/null'
+history_size=$(sed -n 's/^HISTSIZE=//p' "${first_output}")
+[[ "${history_size}" =~ ^[1-9][0-9]*$ ]] \
+    || fail 'interactive Bash HISTSIZE is not nonzero'
+grep -Fq 'EDBP_SESSION_ONE_MARKER' "${first_output}" \
+    || fail 'current-shell history did not retain a command'
+if grep -Fq 'EDBP_OLD_DISK_HISTORY_MARKER' "${first_output}"; then
+    fail 'existing persistent Bash history was loaded'
+fi
+
+second_output=${test_directory}/second.out
+printf '%s\n' 'history' 'exit' | \
+    HOME="${home}" bash --noprofile --rcfile "${runtime_rc}" -i \
+        >"${second_output}" 2>/dev/null
+if grep -Fq 'EDBP_SESSION_ONE_MARKER' "${second_output}"; then
+    fail 'a command persisted into a second shell session'
+fi
+if grep -Fq 'EDBP_OLD_DISK_HISTORY_MARKER' "${second_output}"; then
+    fail 'a second shell loaded an existing persistent history file'
+fi
+grep -Fqx 'echo EDBP_OLD_DISK_HISTORY_MARKER' "${home}/.bash_history" \
+    || fail 'policy unexpectedly rewrote an existing history file'
+
+if grep -REn \
+    'HISTSIZE=0|HISTFILESIZE=0|history[[:space:]]+-c|chattr|\.bash_history.*(ln|symlink)' \
+    "${hook}" "${policy}" >/dev/null; then
+    fail 'a forbidden history-disabling or filesystem workaround is present'
+fi
+
+printf '%s\n' 'Bash session-history policy regression passed.'
