@@ -1,0 +1,55 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: OOBE username regression: %s\n' "$1" >&2
+    exit 1
+}
+
+oobe=config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
+
+validator=$(sed -n '/^validate_username_syntax() {$/,/^}$/p' "${oobe}")
+[[ -n "${validator}" ]] || fail 'validate_username_syntax could not be extracted'
+export ADMIN_USER=localadmin
+eval "${validator}"
+
+for candidate in \
+    ab.cd \
+    os.haddad \
+    ali.ahmad.haddad; do
+    validate_username_syntax "${candidate}" \
+        || fail "valid username was rejected: ${candidate}"
+done
+
+for candidate in \
+    a.haddad \
+    ab.c \
+    ab..cd \
+    Ab.cd \
+    ab-cd \
+    localadmin; do
+    if validate_username_syntax "${candidate}"; then
+        fail "invalid username was accepted: ${candidate}"
+    fi
+done
+
+if validate_username_syntax 'abcdefghijklmnop.qrstuvwxyzabcdef'; then
+    fail 'username longer than 32 characters was accepted'
+fi
+
+grep -Fqx "    validate_username_syntax \"\${transaction_user}\" || return 1" \
+    "${oobe}" \
+    || fail 'rollback does not use the shared dotted-login validator'
+grep -Fqx "    validate_username_syntax \"\${candidate}\" || return 1" \
+    "${oobe}" \
+    || fail 'interactive validation does not use the shared syntax policy'
+grep -Fqx "    --badname \\" "${oobe}" \
+    || fail 'validated dotted login is not passed through useradd --badname'
+grep -Fq '5-32 lowercase characters in dot-separated components' "${oobe}" \
+    || fail 'username prompt does not state the total length policy'
+
+printf '%s\n' 'OOBE username policy regression passed.'

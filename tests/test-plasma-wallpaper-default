@@ -1,0 +1,52 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: Plasma wallpaper regression: %s\n' "$1" >&2
+    exit 1
+}
+
+hook=config/hooks/live/045-configure-plasma-defaults.hook.chroot
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+breeze=${test_directory}/defaults
+taskmanager=${test_directory}/main.xml
+printf '%s\n' \
+    '[General]' \
+    'showDesktopBackground=true' \
+    '' \
+    '[Wallpaper]' \
+    'Image=Next' \
+    'FillMode=2' >"${breeze}"
+printf '%s\n' \
+    '<kcfg>' \
+    '  <group name="General">' \
+    '    <entry name="launchers" type="StringList">' \
+    '      <default>applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser</default>' \
+    '    </entry>' \
+    '  </group>' \
+    '</kcfg>' >"${taskmanager}"
+
+"${hook}" "${breeze}" "${taskmanager}"
+grep -Fqx 'Image=EDBP' "${breeze}" \
+    || fail 'Breeze LookAndFeel did not select the EDBP package'
+[[ $(grep -Fxc 'Image=EDBP' "${breeze}") -eq 1 ]] \
+    || fail 'wallpaper default is duplicated'
+if grep -Fqx 'Image=Next' "${breeze}"; then
+    fail 'stock Breeze wallpaper remained selected'
+fi
+
+# The production hook must be idempotent.
+"${hook}" "${breeze}" "${taskmanager}"
+
+printf '%s\n' '[Wallpaper]' 'Image=Unexpected' >"${breeze}"
+if "${hook}" "${breeze}" "${taskmanager}" >/dev/null 2>&1; then
+    fail 'incompatible Breeze defaults were not rejected fail-closed'
+fi
+
+printf '%s\n' 'Plasma wallpaper default regression passed.'

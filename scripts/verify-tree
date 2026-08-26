@@ -54,14 +54,21 @@ sh -n auto/config
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
+sh -n config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-finish-install-diagnostic
 bash -n tests/test-in-target-stdout-policy
+bash -n tests/test-oobe-hostname-policy
+bash -n tests/test-oobe-username-policy
 bash -n tests/test-offline-apt-setup-policy
 bash -n tests/test-offline-uefi-bootloader-policy
+bash -n tests/test-plasma-launcher-default
+bash -n tests/test-plasma-wallpaper-default
 
 for installer_script in \
     config/includes.installer/edbp-late-command \
     config/includes.installer/edbp-partman-policy \
+    config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy; do
     [[ -x "${installer_script}" ]] \
         || fail "installer script is not executable: ${installer_script}"
@@ -86,14 +93,20 @@ shellcheck -x --severity=style \
     auto/config \
     config/hooks/live/*.hook.chroot \
     config/includes.installer/edbp-late-command \
+    config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
+    tests/test-finish-install-diagnostic \
     tests/test-in-target-stdout-policy \
+    tests/test-oobe-hostname-policy \
+    tests/test-oobe-username-policy \
     tests/test-offline-apt-setup-policy \
-    tests/test-offline-uefi-bootloader-policy
+    tests/test-offline-uefi-bootloader-policy \
+    tests/test-plasma-launcher-default \
+    tests/test-plasma-wallpaper-default
 
 preseed_template=config/includes.installer/preseed.cfg.in
 preseed_staged=config/includes.installer/preseed.cfg
@@ -286,8 +299,13 @@ if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
 ./tests/test-in-target-stdout-policy
+./tests/test-oobe-hostname-policy
+./tests/test-oobe-username-policy
 ./tests/test-offline-apt-setup-policy
 ./tests/test-offline-uefi-bootloader-policy
+./tests/test-plasma-wallpaper-default
+./tests/test-plasma-launcher-default
+./tests/test-finish-install-diagnostic
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'
@@ -310,6 +328,40 @@ grep -Fqx 'defaultWallpaperTheme=EDBP' \
 grep -Fqx 'defaultFileSuffix=.jpg' \
     config/includes.chroot_after_packages/etc/xdg/plasmarc \
     || fail 'Plasma wallpaper suffix is not pinned to JPEG'
+
+plasma_defaults_hook=config/hooks/live/045-configure-plasma-defaults.hook.chroot
+grep -Fq \
+    '/usr/share/plasma/look-and-feel/org.kde.breeze.desktop/contents/defaults' \
+    "${plasma_defaults_hook}" \
+    || fail 'Breeze LookAndFeel wallpaper default is not patched at build time'
+grep -Fq \
+    '/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml' \
+    "${plasma_defaults_hook}" \
+    || fail 'Plasma taskmanager launcher default is not patched at build time'
+grep -Fq "sections[0].replace('Image=Next', 'Image=EDBP', 1)" \
+    "${plasma_defaults_hook}" \
+    || fail 'Breeze LookAndFeel does not select EDBP fail-closed'
+grep -Fq \
+    "'preferred://filemanager,preferred://browser'" \
+    "${plasma_defaults_hook}" \
+    || fail 'reviewed Plasma launcher default is incomplete'
+if grep -R -x 'plasma-discover' config/package-lists >/dev/null; then
+    fail 'Discover must not be installed to satisfy an unwanted launcher'
+fi
+
+finish_trace_installer=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
+grep -Fq 'TEMPORARY DIAGNOSTIC' "${finish_trace_installer}" \
+    || fail 'finish-install tracer is not clearly marked temporary'
+grep -Fq 'checkpoint=94edbp-finish-install-trace' \
+    "${finish_trace_installer}" \
+    || fail 'finish-install tracer does not identify its pre-unmount checkpoint'
+grep -Fqx 'exit 0' "${finish_trace_installer}" \
+    || fail 'finish-install tracer is not fail-open'
+if grep -Eq \
+    'finish-install\.postinst|\.edbp-original|anna-install' \
+    "${finish_trace_installer}"; then
+    fail 'finish-install tracer must not replace package scripts or install udebs'
+fi
 
 grep -Fqx \
     'Dir::Etc::Trusted "/usr/share/keyrings/debian-archive-keyring.gpg";' \

@@ -1,0 +1,69 @@
+#!/bin/sh
+
+# TEMPORARY DIAGNOSTIC: remove after the generic finish-install failure is
+# identified. Hook 94 persists the relevant installer log immediately before
+# upstream 95umount detaches the installed target. It never changes another
+# hook's return code and always exits successfully.
+
+set -u
+
+trace=${EDBP_FINISH_TRACE_LOG:-/target/var/log/installer/edbp-finish-install-debug.log}
+installer_syslog=${EDBP_FINISH_TRACE_SYSLOG:-/var/log/syslog}
+trace_directory=${trace%/*}
+temporary=''
+
+# cleanup is invoked indirectly by the trap below; ShellCheck cannot model
+# that callback path.
+# shellcheck disable=SC2317
+cleanup() {
+    rm -f -- "${temporary}" 2>/dev/null || true
+}
+
+trap cleanup 0
+
+if ! mkdir -p -- "${trace_directory}" 2>/dev/null; then
+    logger -t edbp-finish-trace \
+        'WARNING: cannot create persistent finish-install trace directory' \
+        2>/dev/null || true
+    exit 0
+fi
+
+if ! temporary=$(mktemp "${trace}.tmp.XXXXXX" 2>/dev/null); then
+    logger -t edbp-finish-trace \
+        'WARNING: cannot allocate persistent finish-install trace' \
+        2>/dev/null || true
+    exit 0
+fi
+
+if {
+    printf '%s\n' \
+        'EDBP TEMPORARY finish-install diagnostic' \
+        'checkpoint=94edbp-finish-install-trace' \
+        "LIVE_INSTALLER_MODE=${LIVE_INSTALLER_MODE:-unset}" \
+        'pending_upstream_hooks=95umount,98exit-installer' \
+        '--- relevant installer syslog through hook 94 ---'
+
+    if [ -r "${installer_syslog}" ]; then
+        grep -E 'finish-install|main-menu' "${installer_syslog}" \
+            2>/dev/null || true
+    else
+        printf '%s\n' 'installer_syslog=unavailable'
+    fi
+
+    printf '%s\n' '--- end EDBP temporary diagnostic ---'
+} >"${temporary}" 2>/dev/null; then
+    chmod 0600 "${temporary}" 2>/dev/null || true
+    chown 0:0 "${temporary}" 2>/dev/null || true
+    if ! mv -f -- "${temporary}" "${trace}" 2>/dev/null; then
+        logger -t edbp-finish-trace \
+            'WARNING: cannot persist finish-install trace' 2>/dev/null || true
+    else
+        temporary=''
+    fi
+else
+    logger -t edbp-finish-trace \
+        'WARNING: cannot write persistent finish-install trace' \
+        2>/dev/null || true
+fi
+
+exit 0

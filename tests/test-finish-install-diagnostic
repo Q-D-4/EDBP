@@ -1,0 +1,57 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: finish-install diagnostic regression: %s\n' "$1" >&2
+    exit 1
+}
+
+diagnostic=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+syslog=${test_directory}/syslog
+printf '%s\n' \
+    'installer finish-install: info: Running /usr/lib/finish-install.d/07preseed' \
+    'installer unrelated: fixture that must not be copied' \
+    'installer main-menu: INFO: Menu item finish-install selected' \
+    >"${syslog}"
+
+trace=${test_directory}/edbp-finish-install-debug.log
+EDBP_FINISH_TRACE_LOG=${trace} \
+EDBP_FINISH_TRACE_SYSLOG=${syslog} \
+LIVE_INSTALLER_MODE=1 \
+    "${diagnostic}"
+
+grep -Fqx 'checkpoint=94edbp-finish-install-trace' "${trace}" \
+    || fail 'hook-94 checkpoint was not persisted'
+grep -Fqx 'LIVE_INSTALLER_MODE=1' "${trace}" \
+    || fail 'Live Installer mode was not persisted'
+grep -Fqx 'pending_upstream_hooks=95umount,98exit-installer' "${trace}" \
+    || fail 'known post-checkpoint lifecycle was not identified'
+grep -Fq 'finish-install.d/07preseed' "${trace}" \
+    || fail 'finish-install path was not copied from syslog'
+grep -Fq 'main-menu' "${trace}" \
+    || fail 'main-menu path was not copied from syslog'
+if grep -Fq 'unrelated' "${trace}"; then
+    fail 'diagnostic copied unrelated installer log content'
+fi
+[[ $(stat -c '%a' "${trace}") == 600 ]] \
+    || fail 'persistent diagnostic is not mode 0600'
+
+# Diagnostic failures are fail-open and may not alter finish-install semantics.
+EDBP_FINISH_TRACE_LOG=/proc/edbp-finish-install-debug.log \
+EDBP_FINISH_TRACE_SYSLOG=${syslog} \
+    "${diagnostic}" 2>/dev/null
+
+if grep -En \
+    'finish-install\.postinst|\.edbp-original|exit "\$\{rc\}"' \
+    "${diagnostic}" >/dev/null; then
+    fail 'diagnostic wraps or replaces the active finish-install postinst'
+fi
+
+printf '%s\n' 'Finish-install diagnostic regression passed.'

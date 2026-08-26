@@ -22,8 +22,16 @@ log_message() {
     printf '%s\n' "$*" | systemd-cat --identifier=edbp-oobe || true
 }
 
+clear_tty() {
+    if [[ -t 1 && "${TERM:-dumb}" != dumb ]]; then
+        printf '\033[2J\033[H\033[3J'
+    fi
+}
+
 show_error() {
+    clear_tty
     whiptail --title "${TITLE}" --msgbox "$1" 10 72 || true
+    clear_tty
 }
 
 fatal() {
@@ -97,8 +105,7 @@ rollback_transaction() {
     done
 
     transaction_user=$(<"${TRANSACTION}/username")
-    [[ "${transaction_user}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || return 1
-    [[ "${transaction_user}" != "${ADMIN_USER}" ]] || return 1
+    validate_username_syntax "${transaction_user}" || return 1
 
     restored_hostname=$(<"${TRANSACTION}/hostname")
     [[ -n "${restored_hostname}" ]] || return 1
@@ -128,13 +135,21 @@ rollback_transaction() {
 
 validate_hostname() {
     local candidate=$1
-    (( ${#candidate} >= 1 && ${#candidate} <= 63 )) || return 1
-    [[ "${candidate}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+    (( ${#candidate} <= 63 )) || return 1
+    [[ "${candidate}" =~ ^[A-Z]+(-[A-Z]+)*-[0-9]{2}$ ]]
+}
+
+validate_username_syntax() {
+    local candidate=$1
+    (( ${#candidate} >= 5 && ${#candidate} <= 32 )) || return 1
+    [[ "${candidate}" =~ ^[a-z][a-z0-9]+(\.[a-z][a-z0-9]+)+$ ]] \
+        || return 1
+    [[ "${candidate}" != "${ADMIN_USER}" ]]
 }
 
 validate_username() {
     local candidate=$1
-    [[ "${candidate}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || return 1
+    validate_username_syntax "${candidate}" || return 1
     getent passwd "${candidate}" >/dev/null 2>&1 && return 1
     getent group "${candidate}" >/dev/null 2>&1 && return 1
     return 0
@@ -165,11 +180,12 @@ prompt_hostname() {
     local candidate
 
     while :; do
+        clear_tty
         candidate=$(whiptail \
             --title "${TITLE}" \
             --nocancel \
             --inputbox \
-            'Enter a unique host name (lowercase letters, digits, and hyphens only):' \
+            'Enter the organizational host name (uppercase segments and exactly two final digits; example: IT-HQ-SUP-01):' \
             11 72 "${old_hostname}" \
             3>&1 1>&2 2>&3)
 
@@ -178,7 +194,7 @@ prompt_hostname() {
             return
         fi
 
-        show_error 'Invalid host name. Use 1-63 lowercase letters, digits, or hyphens; a hyphen cannot be first or last.'
+        show_error 'Invalid host name. Use uppercase letter segments separated by single hyphens, end with a hyphen and exactly two digits, and keep the total length at 63 characters or fewer (example: IT-SUP-01).'
     done
 }
 
@@ -186,11 +202,12 @@ prompt_username() {
     local candidate
 
     while :; do
+        clear_tty
         candidate=$(whiptail \
             --title "${TITLE}" \
             --nocancel \
             --inputbox \
-            'Enter the daily standard-user name. This account will not receive sudo privileges:' \
+            'Enter the daily standard-user name (5-32 lowercase characters in dot-separated components; example: os.haddad). This account will not receive sudo privileges:' \
             12 72 \
             3>&1 1>&2 2>&3)
 
@@ -199,7 +216,7 @@ prompt_username() {
             return
         fi
 
-        show_error 'Invalid or already-used name. Start with a lowercase letter; then use at most 31 lowercase letters, digits, underscores, or hyphens.'
+        show_error 'Invalid or already-used name. Use 5-32 lowercase ASCII letters or digits in dot-separated components of at least two characters each (example: ab.haddad). Underscores, hyphens, spaces, and repeated dots are not allowed.'
     done
 }
 
@@ -207,6 +224,7 @@ prompt_password() {
     local candidate confirmation
 
     while :; do
+        clear_tty
         candidate=$(whiptail \
             --title "${TITLE}" \
             --nocancel \
@@ -230,6 +248,7 @@ prompt_password() {
             continue
         fi
 
+        clear_tty
         confirmation=$(whiptail \
             --title "${TITLE}" \
             --nocancel \
@@ -332,7 +351,11 @@ mv -- "${work_dir}" "${TRANSACTION}"
 work_dir=${TRANSACTION}
 sync -f "${STATE_ROOT}"
 
+# Debian shadow-utils rejects dots by default. --badname is deliberately
+# constrained to the login that already passed validate_username_syntax and
+# the passwd/group collision checks above.
 useradd \
+    --badname \
     --create-home \
     --user-group \
     --groups "${SCANNER_GROUP}" \

@@ -1,0 +1,49 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: Plasma launcher regression: %s\n' "$1" >&2
+    exit 1
+}
+
+hook=config/hooks/live/045-configure-plasma-defaults.hook.chroot
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+breeze=${test_directory}/defaults
+taskmanager=${test_directory}/main.xml
+printf '%s\n' '[Wallpaper]' 'Image=Next' >"${breeze}"
+printf '%s\n' \
+    '<kcfg>' \
+    '  <group name="General">' \
+    '    <entry name="launchers" type="StringList">' \
+    '      <label>Launchers</label>' \
+    '      <default>applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser</default>' \
+    '    </entry>' \
+    '  </group>' \
+    '</kcfg>' >"${taskmanager}"
+
+"${hook}" "${breeze}" "${taskmanager}"
+
+expected='applications:systemsettings.desktop,preferred://filemanager,preferred://browser'
+grep -Fq "<default>${expected}</default>" "${taskmanager}" \
+    || fail 'reviewed System Settings, file manager, and browser launchers were not preserved'
+if grep -Fq 'org.kde.discover.desktop' "${taskmanager}"; then
+    fail 'Discover remains in the new-profile launcher default'
+fi
+grep -Fq '<label>Launchers</label>' "${taskmanager}" \
+    || fail 'unrelated taskmanager XML was changed'
+
+printf '%s\n' \
+    '<kcfg><group name="General"><entry name="launchers" type="StringList">' \
+    '<default>applications:unexpected.desktop</default>' \
+    '</entry></group></kcfg>' >"${taskmanager}"
+if "${hook}" "${breeze}" "${taskmanager}" >/dev/null 2>&1; then
+    fail 'incompatible taskmanager defaults were not rejected fail-closed'
+fi
+
+printf '%s\n' 'Plasma launcher default regression passed.'

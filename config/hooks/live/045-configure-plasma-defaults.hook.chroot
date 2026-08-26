@@ -1,0 +1,135 @@
+#!/bin/sh
+
+set -eu
+
+breeze_defaults=${1:-/usr/share/plasma/look-and-feel/org.kde.breeze.desktop/contents/defaults}
+taskmanager_config=${2:-/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml}
+
+python3 - "${breeze_defaults}" "${taskmanager_config}" <<'PY'
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+
+def fail(message):
+    raise SystemExit(f'ERROR: {message}')
+
+
+def read_regular(path, description):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail(f'{description} is missing: {path}')
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        fail(f'{description} is not a regular non-symlink file: {path}')
+    try:
+        return path.read_text(encoding='utf-8'), metadata
+    except (OSError, UnicodeError) as error:
+        fail(f'cannot read {description}: {error}')
+
+
+def replace_atomic(path, content, metadata):
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.edbp.', dir=path.parent
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8', newline='') as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+        temporary_metadata = temporary.stat()
+        if (
+            temporary_metadata.st_uid != metadata.st_uid
+            or temporary_metadata.st_gid != metadata.st_gid
+        ):
+            os.chown(temporary, metadata.st_uid, metadata.st_gid)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def configure_wallpaper(path):
+    content, metadata = read_regular(path, 'Breeze LookAndFeel defaults')
+    sections = re.findall(
+        r'(?ms)^\[Wallpaper\][ \t]*\n.*?(?=^\[|\Z)', content
+    )
+    if len(sections) != 1:
+        fail('Breeze defaults must contain exactly one [Wallpaper] section')
+    image_entries = re.findall(r'(?m)^Image=([^\r\n]+)$', sections[0])
+    if image_entries == ['EDBP']:
+        return
+    if image_entries != ['Next']:
+        fail('Breeze wallpaper default is not the reviewed Image=Next value')
+    replacement = sections[0].replace('Image=Next', 'Image=EDBP', 1)
+    updated = content.replace(sections[0], replacement, 1)
+    replace_atomic(path, updated, metadata)
+
+
+def configure_launchers(path):
+    content, metadata = read_regular(path, 'Plasma taskmanager configuration')
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as error:
+        fail(f'Plasma taskmanager configuration is invalid XML: {error}')
+
+    entries = [
+        entry
+        for entry in root.iter('entry')
+        if entry.get('name') == 'launchers'
+        and entry.get('type') == 'StringList'
+    ]
+    if len(entries) != 1:
+        fail('taskmanager must contain exactly one StringList launchers entry')
+    defaults = entries[0].findall('default')
+    if len(defaults) != 1:
+        fail('taskmanager launchers entry must contain exactly one default')
+
+    stock = (
+        'applications:systemsettings.desktop,'
+        'applications:org.kde.discover.desktop,'
+        'preferred://filemanager,preferred://browser'
+    )
+    edbp = (
+        'applications:systemsettings.desktop,'
+        'preferred://filemanager,preferred://browser'
+    )
+    current = defaults[0].text or ''
+    if current == edbp:
+        return
+    if current != stock or content.count(stock) != 1:
+        fail('taskmanager launcher default differs from the reviewed Plasma 6 layout')
+    replace_atomic(path, content.replace(stock, edbp, 1), metadata)
+
+
+configure_wallpaper(pathlib.Path(sys.argv[1]))
+configure_launchers(pathlib.Path(sys.argv[2]))
+PY
+
+grep -Fqx 'Image=EDBP' "${breeze_defaults}" || {
+    printf '%s\n' 'ERROR: Breeze LookAndFeel does not select EDBP wallpaper' >&2
+    exit 1
+}
+
+if grep -Fq 'applications:org.kde.discover.desktop' "${taskmanager_config}"; then
+    printf '%s\n' 'ERROR: Plasma taskmanager still defaults to Discover' >&2
+    exit 1
+fi
+
+grep -Fq \
+    'applications:systemsettings.desktop,preferred://filemanager,preferred://browser' \
+    "${taskmanager_config}" || {
+        printf '%s\n' 'ERROR: EDBP taskmanager launcher default is incomplete' >&2
+        exit 1
+    }

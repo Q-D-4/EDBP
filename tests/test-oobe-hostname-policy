@@ -1,0 +1,54 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: OOBE hostname regression: %s\n' "$1" >&2
+    exit 1
+}
+
+oobe=config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
+
+validator=$(sed -n '/^validate_hostname() {$/,/^}$/p' "${oobe}")
+[[ -n "${validator}" ]] || fail 'validate_hostname could not be extracted'
+eval "${validator}"
+
+for candidate in \
+    IT-01 \
+    IT-SUP-01 \
+    IT-HQ-SUP-01; do
+    validate_hostname "${candidate}" \
+        || fail "valid hostname was rejected: ${candidate}"
+done
+
+for candidate in \
+    it-01 \
+    IT-SUP \
+    IT--SUP-01 \
+    IT-SUP-1 \
+    IT-SUP-001 \
+    -IT-01 \
+    IT-01-; do
+    if validate_hostname "${candidate}"; then
+        fail "invalid hostname was accepted: ${candidate}"
+    fi
+done
+
+printf -v segment_60 '%*s' 60 ''
+segment_60=${segment_60// /A}
+validate_hostname "${segment_60}-01" \
+    || fail '63-character hostname was rejected'
+
+if validate_hostname "A${segment_60}-01"; then
+    fail 'hostname longer than 63 characters was accepted'
+fi
+
+grep -Fq 'uppercase segments and exactly two final digits' "${oobe}" \
+    || fail 'hostname prompt does not describe the operational grammar'
+grep -Fq "printf '\\033[2J\\033[H\\033[3J'" "${oobe}" \
+    || fail 'TTY redraw does not clear prior validation output'
+
+printf '%s\n' 'OOBE hostname policy regression passed.'
