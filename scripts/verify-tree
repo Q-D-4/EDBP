@@ -56,6 +56,7 @@ sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
 bash -n tests/test-offline-apt-setup-policy
+bash -n tests/test-offline-uefi-bootloader-policy
 
 for installer_script in \
     config/includes.installer/edbp-late-command \
@@ -89,7 +90,8 @@ shellcheck -x --severity=style \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
-    tests/test-offline-apt-setup-policy
+    tests/test-offline-apt-setup-policy \
+    tests/test-offline-uefi-bootloader-policy
 
 preseed_template=config/includes.installer/preseed.cfg.in
 preseed_staged=config/includes.installer/preseed.cfg
@@ -282,6 +284,7 @@ if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
 ./tests/test-offline-apt-setup-policy
+./tests/test-offline-uefi-bootloader-policy
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'

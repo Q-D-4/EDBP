@@ -1,0 +1,52 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: offline UEFI bootloader regression: %s\n' "$1" >&2
+    exit 1
+}
+
+package_list=config/package-lists/bootloader-uefi.list.chroot
+validation_hook=config/hooks/live/055-validate-offline-uefi-bootloader.hook.chroot
+
+[[ -f "${package_list}" && ! -L "${package_list}" ]] \
+    || fail 'dedicated Live chroot package list is missing'
+
+for package in \
+    grub-efi-amd64 \
+    grub-efi-amd64-signed \
+    shim-signed \
+    efibootmgr; do
+    [[ $(grep -Fxc "${package}" "${package_list}") -eq 1 ]] \
+        || fail "required explicit package root is missing or duplicated: ${package}"
+done
+
+if grep -R -xE 'grub-pc(-bin)?' config/package-lists >/dev/null; then
+    fail 'BIOS-only GRUB package appears in the Live chroot package lists'
+fi
+
+for required_build_setting in \
+    '--architecture amd64' \
+    '--bootloaders grub-efi' \
+    '--uefi-secure-boot auto' \
+    '--debian-installer live' \
+    '--apt-recommends false'; do
+    grep -Fq -- "${required_build_setting}" auto/config \
+        || fail "required build setting changed: ${required_build_setting}"
+done
+
+[[ -x "${validation_hook}" ]] \
+    || fail 'UEFI package-closure validation hook is not executable'
+grep -Fq 'apt-get --simulate --no-install-recommends install' \
+    "${validation_hook}" \
+    || fail 'closure validation does not use Debian APT metadata'
+if grep -Eq 'apt-get[[:space:]]+(update|install)([[:space:]]|$)' \
+    "${validation_hook}"; then
+    fail 'closure validation performs a mutating or network APT operation'
+fi
+
+printf '%s\n' 'Offline UEFI bootloader policy regression passed.'
