@@ -5,6 +5,7 @@ set -u
 tag=edbp-apt-media-policy
 generator_dir=/usr/lib/apt-setup/generators
 target="${generator_dir}/40cdrom"
+finish_install_hook=/usr/lib/finish-install.d/10apt-cdrom-setup
 tmp=
 
 log_error() {
@@ -48,6 +49,21 @@ if [ "$uid" != 0 ]; then
     fail_closed 'apt media policy must run as root in Debian Installer'
 fi
 
+# The stock finish hook can independently enable its media-removal path for a
+# Live ISO booted from USB, then update APT in the installed target.  Since EDBP's
+# replacement 40cdrom creates no media source, that hook is both redundant and
+# incompatible with the zero-network installation policy.  It was delivered
+# by the same already-loaded apt-cdrom-setup udeb as 40cdrom, so remove it now.
+if [ -e "$finish_install_hook" ] || [ -L "$finish_install_hook" ]; then
+    if [ ! -f "$finish_install_hook" ] \
+        || [ -L "$finish_install_hook" ] \
+        || [ ! -x "$finish_install_hook" ]; then
+        fail_closed 'apt-cdrom finish hook is not a safe executable file'
+    fi
+    rm -f "$finish_install_hook" \
+        || fail_closed 'cannot disable apt-cdrom finish hook'
+fi
+
 trap cleanup 0
 trap 'exit 10' 1 2 15
 
@@ -64,10 +80,19 @@ if ! cat >"$tmp" <<'EOF'
 set -u
 
 # Debian Live Installer copies the reviewed SquashFS; the hybrid ISO is not an
-# APT package disc.  Emit no source fragment and do not scan the Live medium.
+# APT package disc.  Emit one harmless comment so apt-setup-verify materializes
+# sources.list.new, without scanning the Live medium or adding a repository.
 if [ "$#" -ne 1 ]; then
     logger -t edbp-apt-media-policy \
         'ERROR: replacement 40cdrom expected one output-fragment argument' || :
+    exit 10
+fi
+
+if ! printf '%s\n' \
+    '# EDBP offline Live installation: no installation-time package source.' \
+    >"$1"; then
+    logger -t edbp-apt-media-policy \
+        'ERROR: replacement 40cdrom cannot write its output fragment' || :
     exit 10
 fi
 

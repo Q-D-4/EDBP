@@ -55,6 +55,7 @@ bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-offline-apt-setup-policy
 
 for installer_script in \
     config/includes.installer/edbp-late-command \
@@ -87,7 +88,8 @@ shellcheck -x --severity=style \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
-    scripts/verify-tree
+    scripts/verify-tree \
+    tests/test-offline-apt-setup-policy
 
 preseed_template=config/includes.installer/preseed.cfg.in
 preseed_staged=config/includes.installer/preseed.cfg
@@ -209,9 +211,18 @@ fi
 grep -Fqx 'd-i apt-setup/use_mirror boolean false' \
     "${rendered_preseed}" \
     || fail 'installer mirror use must be disabled for offline deployment'
-grep -Fqx 'd-i apt-setup/disable-cdrom-entries boolean true' \
+grep -Fqx 'd-i apt-setup/services-select multiselect' \
     "${rendered_preseed}" \
-    || fail 'installer must not retain the hybrid ISO as an APT source'
+    || fail 'installer security, updates, and backports services must be disabled'
+if [[ $(awk \
+    '$1 == "d-i" && $2 == "apt-setup/services-select" { count += 1 } END { print count + 0 }' \
+    "${rendered_preseed}") != 1 ]]; then
+    fail 'installer must contain exactly one empty apt service selection'
+fi
+if awk '$1 == "d-i" && $2 == "apt-setup/disable-cdrom-entries" { found = 1 } END { exit !found }' \
+    "${rendered_preseed}"; then
+    fail 'redundant disable-cdrom-entries preseed can trigger target apt-get update'
+fi
 grep -Fqx 'd-i partman/early_command string /bin/sh /edbp-partman-policy' \
     "${rendered_preseed}" \
     || fail 'installer storage policy command is missing'
@@ -219,6 +230,7 @@ grep -Fqx 'd-i partman/early_command string /bin/sh /edbp-partman-policy' \
 obsolete_apt_media_override=config/includes.installer/usr/lib/apt-setup/generators/40cdrom
 obsolete_apt_media_hook=config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy
 apt_media_policy_generator=config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+temporary_apt_setup_tracer=config/includes.installer/usr/lib/apt-setup/generators/39z-edbp-apt-setup-trace
 
 if [[ -e "${obsolete_apt_media_override}" \
     || -L "${obsolete_apt_media_override}" ]]; then
@@ -228,8 +240,16 @@ if [[ -e "${obsolete_apt_media_hook}" \
     || -L "${obsolete_apt_media_hook}" ]]; then
     fail 'obsolete post-base-installer apt media hook must not remain'
 fi
+if [[ -e "${temporary_apt_setup_tracer}" \
+    || -L "${temporary_apt_setup_tracer}" ]]; then
+    fail 'temporary apt-setup tracer must not ship'
+fi
 if grep -R -Fq 'anna-install apt-cdrom-setup' config/includes.installer; then
     fail 'installer must not depend on anna timing for apt media policy'
+fi
+if grep -R -Eq 'edbp-apt-setup-debug|\.edbp-trace-original' \
+    config/includes.installer; then
+    fail 'temporary apt-setup trace artifacts must not remain'
 fi
 grep -Fqx 'generator_dir=/usr/lib/apt-setup/generators' \
     "${apt_media_policy_generator}" \
@@ -237,6 +257,12 @@ grep -Fqx 'generator_dir=/usr/lib/apt-setup/generators' \
 grep -Fqx 'target="${generator_dir}/40cdrom"' \
     "${apt_media_policy_generator}" \
     || fail 'apt media policy does not target Debian 40cdrom'
+grep -Fqx 'finish_install_hook=/usr/lib/finish-install.d/10apt-cdrom-setup' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not target Debian apt-cdrom finish hook'
+grep -Fq 'rm -f "$finish_install_hook"' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not prevent finish-install apt-get update'
 grep -Fqx 'if ! tmp=$(mktemp "${generator_dir}/.40cdrom.edbp.XXXXXX"); then' \
     "${apt_media_policy_generator}" \
     || fail 'apt media policy replacement is not created atomically beside 40cdrom'
@@ -255,6 +281,7 @@ grep -Fqx '    exit 10' \
 if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
+./tests/test-offline-apt-setup-policy
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'

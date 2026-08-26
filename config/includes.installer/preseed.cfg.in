@@ -37,9 +37,13 @@ d-i user-setup/allow-password-weak boolean false
 ### Package source policy
 # The installation must succeed from the ISO without external APT traffic.
 # The Live filesystem already contains the complete target.  The ISO is not a
-# Debian package disc and must never be retained as an apt-cdrom source.
+# Debian package disc and must never be retained as an apt-cdrom source.  An
+# empty services selection prevents security, updates, and backports generators
+# from depending on a network mirror that is intentionally absent.
 d-i apt-setup/use_mirror boolean false
-d-i apt-setup/disable-cdrom-entries boolean true
+d-i apt-setup/services-select multiselect
+# The EDBP media-policy generator creates no cdrom entry and removes Debian's
+# now-redundant finish hook, so disable-cdrom-entries is intentionally unset.
 
 ### Partitioning safety and UEFI
 # Only the preferred label is seeded. Deliberately absent:

@@ -1,0 +1,115 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: offline apt-setup regression: %s\n' "$1" >&2
+    exit 1
+}
+
+policy=config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+tracer=config/includes.installer/usr/lib/apt-setup/generators/39z-edbp-apt-setup-trace
+preseed=config/includes.installer/preseed.cfg.in
+
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+replacement=${test_directory}/40cdrom
+if ! awk '
+    index($0, "if ! cat >\"$tmp\" <<") == 1 {
+        capture = 1
+        next
+    }
+    capture && $0 == "EOF" {
+        complete = 1
+        exit
+    }
+    capture {
+        print
+    }
+    END {
+        if (!complete)
+            exit 1
+    }
+' "${policy}" >"${replacement}"; then
+    fail 'cannot extract the generated 40cdrom replacement'
+fi
+chmod 0755 "${replacement}"
+sh -n "${replacement}"
+
+fragment=${test_directory}/40cdrom.fragment
+replacement_rc=0
+"${replacement}" "${fragment}" || replacement_rc=$?
+[[ ${replacement_rc} -eq 0 ]] \
+    || fail "replacement 40cdrom returned ${replacement_rc}, expected 0"
+
+[[ -s "${fragment}" ]] \
+    || fail 'replacement 40cdrom emitted an empty fragment'
+[[ $(wc -l <"${fragment}") -eq 1 ]] \
+    || fail 'replacement 40cdrom must emit exactly one line'
+grep -Eq '^#[[:space:]]+[^[:space:]]' "${fragment}" \
+    || fail 'replacement 40cdrom output is not a harmless comment'
+if grep -Eiq '(^|[[:space:]#])(deb|deb-src)[[:space:]]|cdrom:|https?://' \
+    "${fragment}"; then
+    fail 'replacement 40cdrom introduced an APT repository'
+fi
+if grep -Eq '^[[:space:]]*(exec[[:space:]]+)?(apt-cdrom|mount|umount)([[:space:]]|$)' \
+    "${replacement}"; then
+    fail 'replacement 40cdrom attempts to scan or mount installation media'
+fi
+
+# apt-setup-verify 1:0.198 calls saveline for a non-empty comment.  Exercise
+# that exact comment path with a previously absent destination file.
+sources_list_new=${test_directory}/target/etc/apt/sources.list.new
+mkdir -p -- "${sources_list_new%/*}"
+while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+        \#*)
+            printf '%s\n' "${line}" >>"${sources_list_new}"
+            ;;
+        *)
+            fail 'apt-setup-verify fixture received a non-comment line'
+            ;;
+    esac
+done <"${fragment}"
+[[ -s "${sources_list_new}" ]] \
+    || fail 'comment fragment did not materialize sources.list.new'
+cmp -s "${fragment}" "${sources_list_new}" \
+    || fail 'apt-setup-compatible comment was not preserved verbatim'
+
+grep -Fqx 'd-i netcfg/enable boolean false' "${preseed}" \
+    || fail 'installer networking is not disabled'
+grep -Fqx 'd-i apt-setup/use_mirror boolean false' "${preseed}" \
+    || fail 'installation-time mirror use is not disabled'
+grep -Fqx 'd-i apt-setup/services-select multiselect' "${preseed}" \
+    || fail 'security, updates, and backports selection is not explicitly empty'
+[[ $(awk \
+    '$1 == "d-i" && $2 == "apt-setup/services-select" { count += 1 } END { print count + 0 }' \
+    "${preseed}") -eq 1 ]] \
+    || fail 'apt service selection must occur exactly once'
+if awk '$1 == "d-i" && $2 == "apt-setup/disable-cdrom-entries" { found = 1 } END { exit !found }' \
+    "${preseed}"; then
+    fail 'disable-cdrom-entries could trigger finish-install apt-get update'
+fi
+
+grep -Fqx 'finish_install_hook=/usr/lib/finish-install.d/10apt-cdrom-setup' \
+    "${policy}" \
+    || fail 'policy does not target the redundant apt-cdrom finish hook'
+grep -Fq "rm -f \"\$finish_install_hook\"" "${policy}" \
+    || fail 'policy does not prevent finish-install apt-get update'
+
+if grep -R -Fq '/tmp/apt-setup.components' config/includes.installer; then
+    fail 'EDBP installer policy fabricates or depends on mirror components'
+fi
+if [[ -e "${tracer}" || -L "${tracer}" ]]; then
+    fail 'temporary apt-setup tracer must not ship'
+fi
+if grep -R -Eq 'edbp-apt-setup-debug|\.edbp-trace-original' \
+    config/includes.installer; then
+    fail 'temporary apt-setup trace artifacts remain in installer content'
+fi
+
+printf '%s\n' 'Offline apt-setup policy regression passed.'
