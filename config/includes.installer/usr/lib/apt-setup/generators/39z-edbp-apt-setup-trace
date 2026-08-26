@@ -3,7 +3,7 @@
 set -u
 
 generator_dir=/usr/lib/apt-setup/generators
-trace_log=/target/root/edbp-apt-setup-debug.log
+trace_log=/tmp/edbp-apt-setup-debug.log
 marker='# EDBP temporary apt-setup trace wrapper'
 
 # Reaching this generator proves that 39edbp returned zero: its only other
@@ -11,7 +11,7 @@ marker='# EDBP temporary apt-setup trace wrapper'
 umask 077
 if ! : >"$trace_log"; then
     logger -t edbp-apt-setup-trace \
-        'Cannot create /target/root/edbp-apt-setup-debug.log' || :
+        'Cannot create /tmp/edbp-apt-setup-debug.log' || :
     exit 0
 fi
 printf '%s rc=0\n' '39edbp-apt-media-policy' >>"$trace_log"
@@ -57,7 +57,7 @@ set -u
 name=${0##*/}
 generator_dir=${0%/*}
 original="${generator_dir}/.edbp-trace-original.${name}"
-trace_log=/target/root/edbp-apt-setup-debug.log
+trace_log=/tmp/edbp-apt-setup-debug.log
 
 "$original" "$@"
 rc=$?
