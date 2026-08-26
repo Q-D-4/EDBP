@@ -11,7 +11,7 @@ log_error() {
     logger -t "$tag" "ERROR: $*" || :
 }
 
-# shellcheck disable=SC2329  # Invoked through the EXIT trap.
+# shellcheck disable=SC2317,SC2329  # Invoked through the EXIT trap.
 cleanup() {
     if [ -n "$tmp" ]; then
         rm -f "$tmp" || :
