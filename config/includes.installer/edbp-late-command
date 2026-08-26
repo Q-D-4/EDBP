@@ -43,12 +43,12 @@ in-target id "${ADMIN_USER}" >/dev/null 2>&1 \
 
 in-target usermod -aG sudo "${ADMIN_USER}"
 
-admin_home=$(in-target getent passwd "${ADMIN_USER}" | awk -F: '{print $6}')
+admin_home=$(in-target --pass-stdout getent passwd "${ADMIN_USER}" | awk -F: '{print $6}')
 [ "${admin_home}" = "/home/${ADMIN_USER}" ] \
     || fail "unexpected localadmin home: ${admin_home}"
 
-admin_uid=$(in-target id -u "${ADMIN_USER}")
-admin_gid=$(in-target id -g "${ADMIN_USER}")
+admin_uid=$(in-target --pass-stdout id -u "${ADMIN_USER}")
+admin_gid=$(in-target --pass-stdout id -g "${ADMIN_USER}")
 
 in-target install -d \
     -o "${admin_uid}" \

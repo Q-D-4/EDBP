@@ -55,6 +55,7 @@ bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-in-target-stdout-policy
 bash -n tests/test-offline-apt-setup-policy
 bash -n tests/test-offline-uefi-bootloader-policy
 
@@ -90,6 +91,7 @@ shellcheck -x --severity=style \
     scripts/stage-admin-keys \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
+    tests/test-in-target-stdout-policy \
     tests/test-offline-apt-setup-policy \
     tests/test-offline-uefi-bootloader-policy
 
@@ -283,6 +285,7 @@ grep -Fqx '    exit 10' \
 if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
+./tests/test-in-target-stdout-policy
 ./tests/test-offline-apt-setup-policy
 ./tests/test-offline-uefi-bootloader-policy
 grep -Fq 'TYPE=linux_raid_member' \
