@@ -1,0 +1,79 @@
+#!/bin/sh
+
+set -u
+
+generator_dir=/usr/lib/apt-setup/generators
+trace_log=/target/root/edbp-apt-setup-debug.log
+marker='# EDBP temporary apt-setup trace wrapper'
+
+# Reaching this generator proves that 39edbp returned zero: its only other
+# return path is the fail-closed code 10, which makes apt-setup stop.
+umask 077
+if ! : >"$trace_log"; then
+    logger -t edbp-apt-setup-trace \
+        'Cannot create /target/root/edbp-apt-setup-debug.log' || :
+    exit 0
+fi
+printf '%s rc=0\n' '39edbp-apt-media-policy' >>"$trace_log"
+printf '%s rc=0\n' "${0##*/}" >>"$trace_log"
+
+# apt-setup expands its generator list before entering the loop.  Replace the
+# still-pending 40..99 entries in place; the hidden originals are not part of
+# that expansion.  Each wrapper returns the original generator's exact code.
+for generator in "$generator_dir"/[4-9][0-9]*; do
+    if [ ! -f "$generator" ] || [ ! -x "$generator" ]; then
+        continue
+    fi
+
+    name=${generator##*/}
+    original="${generator_dir}/.edbp-trace-original.${name}"
+
+    if grep -Fq "$marker" "$generator" && [ -x "$original" ]; then
+        continue
+    fi
+
+    original_tmp=$(mktemp "${generator_dir}/.${name}.original.XXXXXX") \
+        || continue
+    wrapper_tmp=$(mktemp "${generator_dir}/.${name}.wrapper.XXXXXX") \
+        || {
+            rm -f "$original_tmp"
+            continue
+        }
+
+    if ! cp -p "$generator" "$original_tmp" \
+        || ! chown 0:0 "$original_tmp" \
+        || ! chmod 0755 "$original_tmp" \
+        || ! mv -f "$original_tmp" "$original"; then
+        rm -f "$original_tmp" "$wrapper_tmp"
+        continue
+    fi
+
+    if ! cat >"$wrapper_tmp" <<'EOF'
+#!/bin/sh
+# EDBP temporary apt-setup trace wrapper
+
+set -u
+
+name=${0##*/}
+generator_dir=${0%/*}
+original="${generator_dir}/.edbp-trace-original.${name}"
+trace_log=/target/root/edbp-apt-setup-debug.log
+
+"$original" "$@"
+rc=$?
+printf '%s rc=%s\n' "$name" "$rc" >>"$trace_log" 2>/dev/null || :
+exit "$rc"
+EOF
+    then
+        rm -f "$wrapper_tmp"
+        continue
+    fi
+
+    if ! chown 0:0 "$wrapper_tmp" \
+        || ! chmod 0755 "$wrapper_tmp" \
+        || ! mv -f "$wrapper_tmp" "$generator"; then
+        rm -f "$wrapper_tmp"
+    fi
+done
+
+exit 0
