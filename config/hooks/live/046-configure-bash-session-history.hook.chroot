@@ -44,8 +44,16 @@ grep -Fqx '[ -z "${PS1-}" ] && return' "${bashrc}" \
     || fail 'Debian /etc/bash.bashrc interactive guard is incompatible'
 grep -Fq '. /etc/bash.bashrc' "${profile}" \
     || fail 'Debian /etc/profile does not cover interactive login Bash'
-grep -Fq 'for i in /etc/profile.d/*.sh; do' "${profile}" \
-    || fail 'Debian /etc/profile does not source profile.d policy files'
+grep -Fqx 'if [ -d /etc/profile.d ]; then' "${profile}" \
+    || fail 'Debian /etc/profile profile.d directory guard is incompatible'
+grep -Fqx \
+    "  for i in \$(run-parts --list --regex '^[a-zA-Z0-9_][a-zA-Z0-9._-]*\.sh$' /etc/profile.d); do" \
+    "${profile}" \
+    || fail 'Debian /etc/profile profile.d run-parts loader is incompatible'
+# This is a literal signature from Debian's profile.d loader.
+# shellcheck disable=SC2016
+grep -Fqx '      . $i' "${profile}" \
+    || fail 'Debian /etc/profile does not source run-parts results'
 
 grep -Fqx '        HISTFILE=/dev/null' "${policy_file}" \
     || fail 'EDBP Bash history policy does not select /dev/null'

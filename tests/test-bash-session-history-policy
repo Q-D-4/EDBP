@@ -28,9 +28,14 @@ printf '%s\n' \
     'if [ "${PS1-}" ]; then' \
     '    . /etc/bash.bashrc' \
     'fi' \
-    'for i in /etc/profile.d/*.sh; do' \
-    '    [ ! -r "$i" ] || . "$i"' \
-    'done' >"${profile}"
+    'if [ -d /etc/profile.d ]; then' \
+    "  for i in \$(run-parts --list --regex '^[a-zA-Z0-9_][a-zA-Z0-9._-]*\.sh$' /etc/profile.d); do" \
+    '    if [ -r $i ]; then' \
+    '      . $i' \
+    '    fi' \
+    '  done' \
+    '  unset i' \
+    'fi' >"${profile}"
 
 "${hook}" "${bashrc}" "${profile}" "${policy}"
 "${hook}" "${bashrc}" "${profile}" "${policy}"
