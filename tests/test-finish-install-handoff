@@ -165,7 +165,7 @@ for obsolete_file in "${obsolete_files[@]}"; do
         || fail "temporary diagnostic remains: ${obsolete_file}"
 done
 
-if rg -n \
+if grep -REn \
     'edbp-finish-install-(debug|post95)\.log|checkpoint=(94edbp-finish-install-trace|97edbp-finish-install-post95-trace|98exit-installer-return)|TEMPORARY finish-install|TEMPORARY DIAGNOSTIC' \
     config/includes.installer scripts >/dev/null; then
     fail 'temporary finish-install diagnostic text remains in production files'
