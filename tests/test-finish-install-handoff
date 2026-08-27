@@ -1,0 +1,174 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: finish-install handoff regression: %s\n' "$1" >&2
+    exit 1
+}
+
+handoff=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
+test_directory=$(mktemp -d)
+trap 'rm -rf -- "${test_directory}"' EXIT
+
+[[ -f ${handoff} && ! -L ${handoff} && -x ${handoff} ]] \
+    || fail 'production Live-installer exit hook is not an executable regular file'
+
+actual_order=$(printf '%s\n' \
+    95umount "${handoff##*/}" 97release-dhcp-lease 98exit-installer 99reboot \
+    | LC_ALL=C sort | paste -sd, -)
+expected_order=95umount,96edbp-live-installer-exit,97release-dhcp-lease,98exit-installer,99reboot
+[[ ${actual_order} == "${expected_order}" ]] \
+    || fail 'production exit hook is not at the reviewed post-95 boundary'
+
+capture_status() {
+    if "$@" >/dev/null 2>&1; then
+        command_status=0
+    else
+        command_status=$?
+    fi
+}
+
+capture_status env LIVE_INSTALLER_MODE=1 "${handoff}"
+[[ ${command_status} -eq 11 ]] \
+    || fail 'LIVE_INSTALLER_MODE=1 did not produce exactly rc=11'
+capture_status env LIVE_INSTALLER_MODE=edbp-live "${handoff}"
+[[ ${command_status} -eq 11 ]] \
+    || fail 'another non-empty Live-installer mode did not produce rc=11'
+capture_status env -u LIVE_INSTALLER_MODE "${handoff}"
+[[ ${command_status} -eq 0 ]] \
+    || fail 'unset Live-installer mode changed non-live Debian Installer behavior'
+capture_status env LIVE_INSTALLER_MODE= "${handoff}"
+[[ ${command_status} -eq 0 ]] \
+    || fail 'empty Live-installer mode changed non-live Debian Installer behavior'
+
+grep -Fqx "if [ -n \"\${LIVE_INSTALLER_MODE:-}\" ]; then" "${handoff}" \
+    || fail 'production handoff is not limited to non-empty Live-installer mode'
+grep -Fqx '    exit 11' "${handoff}" \
+    || fail 'canonical EXIT_INSTALLER rc=11 is not returned unchanged'
+grep -Fqx 'exit 0' "${handoff}" \
+    || fail 'non-live continuation does not return rc=0'
+
+if grep -En '(^|[[:space:];&|])u?mount([[:space:]]|$)' "${handoff}" >/dev/null; then
+    fail 'production handoff alters mount state'
+fi
+if grep -Fq '/target' "${handoff}"; then
+    fail 'production handoff writes to or depends on the installed target'
+fi
+if grep -En \
+    '(^|[[:space:];&|])(apt(-get)?|apt-install|anna-install|dpkg|udpkg)([[:space:]]|$)' \
+    "${handoff}" >/dev/null; then
+    fail 'production handoff installs or configures packages'
+fi
+if grep -En \
+    '(^|[[:space:];&|])(curl|wget|ip|ifconfig|nmcli|networkctl|dhclient|udhcpc|ping|kill)([[:space:]]|$)' \
+    "${handoff}" >/dev/null; then
+    fail 'production handoff performs a network operation'
+fi
+if grep -En \
+    '(^|[[:space:];&|])(reboot|poweroff|halt|shutdown)([[:space:]]|$)' \
+    "${handoff}" >/dev/null; then
+    fail 'production handoff reboots or powers off the installer'
+fi
+if grep -En \
+    '/usr/lib/finish-install\.d/(95umount|98exit-installer)|(^|[[:space:];&|])(cp|install|ln|mv|rm|sed)([[:space:]]|$)' \
+    "${handoff}" >/dev/null; then
+    fail 'production handoff manipulates an upstream finish-install hook'
+fi
+
+# This is a focused model of finish-install 2.124's reviewed return-code
+# dispatch. The stub hooks below are not presented as upstream binaries.
+sequence_log=${test_directory}/sequence
+model_finish_install_rc_handling() {
+    local live_mode=$1
+    local modeled_hook
+    local hook_status
+    shift
+
+    : >"${sequence_log}"
+    for modeled_hook in "$@"; do
+        printf '%s\n' "${modeled_hook##*/}" >>"${sequence_log}"
+        if [[ ${live_mode} == __unset__ ]]; then
+            capture_status env -u LIVE_INSTALLER_MODE "${modeled_hook}"
+        else
+            capture_status env LIVE_INSTALLER_MODE="${live_mode}" "${modeled_hook}"
+        fi
+        hook_status=${command_status}
+        case ${hook_status} in
+            10)
+                return 10
+                ;;
+            11)
+                return 11
+                ;;
+            *)
+                ;;
+        esac
+    done
+    return 0
+}
+
+make_stub() {
+    local path=$1
+    local status=$2
+
+    printf '%s\n' '#!/bin/sh' "exit ${status}" >"${path}"
+    chmod 0755 "${path}"
+}
+
+modeled_95=${test_directory}/95umount
+modeled_97=${test_directory}/97release-dhcp-lease
+modeled_98=${test_directory}/98exit-installer
+modeled_99=${test_directory}/99reboot
+make_stub "${modeled_95}" 0
+make_stub "${modeled_97}" 0
+make_stub "${modeled_98}" 1
+make_stub "${modeled_99}" 0
+
+if model_finish_install_rc_handling 1 \
+    "${modeled_95}" "${handoff}" "${modeled_97}" "${modeled_98}" "${modeled_99}"; then
+    modeled_status=0
+else
+    modeled_status=$?
+fi
+[[ ${modeled_status} -eq 11 ]] \
+    || fail 'modeled finish-install path swallowed the Live handoff rc=11'
+[[ $(paste -sd, "${sequence_log}") == \
+    '95umount,96edbp-live-installer-exit' ]] \
+    || fail 'Live handoff did not stop processing at the post-95 boundary'
+
+if model_finish_install_rc_handling __unset__ \
+    "${modeled_95}" "${handoff}" "${modeled_97}" "${modeled_98}" "${modeled_99}"; then
+    modeled_status=0
+else
+    modeled_status=$?
+fi
+[[ ${modeled_status} -eq 0 ]] \
+    || fail 'modeled non-live path did not continue normally'
+[[ $(paste -sd, "${sequence_log}") == \
+    '95umount,96edbp-live-installer-exit,97release-dhcp-lease,98exit-installer,99reboot' ]] \
+    || fail 'non-live mode did not continue through the upstream hook path'
+
+obsolete_files=(
+    config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
+    config/includes.installer/usr/lib/finish-install.d/94z-edbp-finish-install-prepare-98-trace
+    config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace
+    config/includes.installer/usr/lib/edbp-finish-install-98-wrapper
+    tests/98exit-installer.trixie.fixture
+    tests/test-finish-install-diagnostic
+)
+for obsolete_file in "${obsolete_files[@]}"; do
+    [[ ! -e ${obsolete_file} && ! -L ${obsolete_file} ]] \
+        || fail "temporary diagnostic remains: ${obsolete_file}"
+done
+
+if rg -n \
+    'edbp-finish-install-(debug|post95)\.log|checkpoint=(94edbp-finish-install-trace|97edbp-finish-install-post95-trace|98exit-installer-return)|TEMPORARY finish-install|TEMPORARY DIAGNOSTIC' \
+    config/includes.installer scripts >/dev/null; then
+    fail 'temporary finish-install diagnostic text remains in production files'
+fi
+
+printf '%s\n' 'Finish-install production handoff regression passed.'

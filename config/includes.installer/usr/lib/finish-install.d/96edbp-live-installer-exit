@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# finish-install executes this hook after target teardown. Status 11 is the
+# canonical Debian Installer request to leave the nested Live installer.
+if [ -n "${LIVE_INSTALLER_MODE:-}" ]; then
+    exit 11
+fi
+
+exit 0

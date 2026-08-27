@@ -56,14 +56,10 @@ sh -n config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-histor
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
-sh -n config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
-sh -n config/includes.installer/usr/lib/finish-install.d/94z-edbp-finish-install-prepare-98-trace
-sh -n config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace
-sh -n config/includes.installer/usr/lib/edbp-finish-install-98-wrapper
+sh -n config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
-sh -n tests/98exit-installer.trixie.fixture
 bash -n tests/test-bash-session-history-policy
-bash -n tests/test-finish-install-diagnostic
+bash -n tests/test-finish-install-handoff
 bash -n tests/test-in-target-stdout-policy
 bash -n tests/test-oobe-hostname-policy
 bash -n tests/test-oobe-username-policy
@@ -75,10 +71,7 @@ bash -n tests/test-plasma-wallpaper-default
 for installer_script in \
     config/includes.installer/edbp-late-command \
     config/includes.installer/edbp-partman-policy \
-    config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace \
-    config/includes.installer/usr/lib/finish-install.d/94z-edbp-finish-install-prepare-98-trace \
-    config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace \
-    config/includes.installer/usr/lib/edbp-finish-install-98-wrapper \
+    config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy; do
     [[ -x "${installer_script}" ]] \
         || fail "installer script is not executable: ${installer_script}"
@@ -103,10 +96,7 @@ shellcheck -x --severity=style \
     auto/config \
     config/hooks/live/*.hook.chroot \
     config/includes.installer/edbp-late-command \
-    config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace \
-    config/includes.installer/usr/lib/finish-install.d/94z-edbp-finish-install-prepare-98-trace \
-    config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace \
-    config/includes.installer/usr/lib/edbp-finish-install-98-wrapper \
+    config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
     config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
@@ -114,15 +104,14 @@ shellcheck -x --severity=style \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
     tests/test-bash-session-history-policy \
-    tests/test-finish-install-diagnostic \
+    tests/test-finish-install-handoff \
     tests/test-in-target-stdout-policy \
     tests/test-oobe-hostname-policy \
     tests/test-oobe-username-policy \
     tests/test-offline-apt-setup-policy \
     tests/test-offline-uefi-bootloader-policy \
     tests/test-plasma-launcher-default \
-    tests/test-plasma-wallpaper-default \
-    tests/98exit-installer.trixie.fixture
+    tests/test-plasma-wallpaper-default
 
 preseed_template=config/includes.installer/preseed.cfg.in
 preseed_staged=config/includes.installer/preseed.cfg
@@ -322,7 +311,7 @@ fi
 ./tests/test-offline-uefi-bootloader-policy
 ./tests/test-plasma-wallpaper-default
 ./tests/test-plasma-launcher-default
-./tests/test-finish-install-diagnostic
+./tests/test-finish-install-handoff
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'
@@ -382,95 +371,29 @@ if grep -REn \
     fail 'Bash history policy disables memory or uses a filesystem workaround'
 fi
 
-finish_trace_installer=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
-finish_prepare_installer=config/includes.installer/usr/lib/finish-install.d/94z-edbp-finish-install-prepare-98-trace
-finish_post95_installer=config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace
-finish_exit_wrapper=config/includes.installer/usr/lib/edbp-finish-install-98-wrapper
-finish_exit_fixture=tests/98exit-installer.trixie.fixture
-reviewed_exit_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
-reviewed_wrapper_sha256=71d3ca5a8ca47fb73fa0346eceeb883eea833f5c241997f26b7027b3036cf507
-grep -Fq 'TEMPORARY DIAGNOSTIC' "${finish_trace_installer}" \
-    || fail 'finish-install tracer is not clearly marked temporary'
-grep -Fq 'checkpoint=94edbp-finish-install-trace' \
-    "${finish_trace_installer}" \
-    || fail 'finish-install tracer does not identify its pre-unmount checkpoint'
-grep -Fqx 'exit 0' "${finish_trace_installer}" \
-    || fail 'finish-install tracer is not fail-open'
-if grep -Eq \
-    'finish-install\.postinst|\.edbp-original|anna-install' \
-    "${finish_trace_installer}"; then
-    fail 'finish-install tracer must not replace package scripts or install udebs'
-fi
-
-for temporary_diagnostic in \
-    "${finish_prepare_installer}" \
-    "${finish_post95_installer}" \
-    "${finish_exit_wrapper}"; do
-    grep -Fq 'TEMPORARY DIAGNOSTIC' "${temporary_diagnostic}" \
-        || fail "finish-install component is not marked temporary: ${temporary_diagnostic}"
-done
-[[ ${finish_prepare_installer##*/} == 94z-edbp-finish-install-prepare-98-trace ]] \
-    || fail 'traced 98 preparation is not ordered between hooks 94 and 95'
-[[ ${finish_post95_installer##*/} == 97edbp-finish-install-post95-trace ]] \
-    || fail 'post-unmount diagnostic is not ordered between hooks 95 and 98'
+finish_handoff_installer=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
+[[ ${finish_handoff_installer##*/} == 96edbp-live-installer-exit ]] \
+    || fail 'Live-installer handoff is not placed at the reviewed post-95 boundary'
+grep -Fqx 'if [ -n "${LIVE_INSTALLER_MODE:-}" ]; then' \
+    "${finish_handoff_installer}" \
+    || fail 'finish-install handoff is not limited to nested Live-installer mode'
+grep -Fqx '    exit 11' "${finish_handoff_installer}" \
+    || fail 'finish-install handoff does not preserve canonical rc=11'
+grep -Fqx 'exit 0' "${finish_handoff_installer}" \
+    || fail 'finish-install handoff changes non-live installer behavior'
 finish_hook_order=$(printf '%s\n' \
-    "${finish_trace_installer##*/}" \
-    "${finish_prepare_installer##*/}" \
     95umount \
-    "${finish_post95_installer##*/}" \
+    "${finish_handoff_installer##*/}" \
     97release-dhcp-lease \
-    98exit-installer | LC_ALL=C sort | paste -sd, -)
+    98exit-installer \
+    99reboot | LC_ALL=C sort | paste -sd, -)
 [[ ${finish_hook_order} == \
-    94edbp-finish-install-trace,94z-edbp-finish-install-prepare-98-trace,95umount,97edbp-finish-install-post95-trace,97release-dhcp-lease,98exit-installer ]] \
-    || fail 'temporary finish-install hooks do not have the reviewed execution order'
-grep -Fq 'checkpoint=97edbp-finish-install-post95-trace' \
-    "${finish_post95_installer}" \
-    || fail 'post-unmount diagnostic does not identify checkpoint 97'
-grep -Fq '/dev/edbp-finish-install-post95.log' \
-    "${finish_post95_installer}" \
-    || fail 'post-unmount diagnostic is not stored in writable d-i devtmpfs'
-grep -Fq '/dev/edbp-finish-install-post95.log' \
-    "${finish_exit_wrapper}" \
-    || fail 'traced 98 does not append to writable d-i devtmpfs'
-if grep -En '(^|[^[:alnum:]_])/(usr|var)(/|[^[:alnum:]_]|$)' \
-    "${finish_post95_installer}"; then
-    fail 'post-unmount diagnostic accesses the read-only /usr or /var trees'
-fi
-grep -Fqx 'reviewed_exit_mode=755' "${finish_prepare_installer}" \
-    || fail 'runtime upstream 98 mode is not pinned to exactly 0755'
-grep -Fq "reviewed_exit_sha256=${reviewed_exit_sha256}" \
-    "${finish_prepare_installer}" \
-    || fail 'pre-95 preparation does not pin reviewed upstream 98 content'
-grep -Fq "reviewed_wrapper_sha256=${reviewed_wrapper_sha256}" \
-    "${finish_prepare_installer}" \
-    || fail 'pre-95 preparation does not pin reviewed wrapper content'
-[[ $(sha256sum "${finish_exit_wrapper}" | awk '{print $1}') == \
-    "${reviewed_wrapper_sha256}" ]] \
-    || fail 'traced 98 wrapper differs from reviewed content'
-[[ -f ${finish_exit_fixture} && ! -L ${finish_exit_fixture} ]] \
-    || fail 'reviewed Trixie 98exit-installer fixture is not a regular file'
-[[ -x ${finish_exit_fixture} ]] \
-    || fail 'reviewed Trixie 98exit-installer fixture is not executable'
-finish_exit_fixture_index=$(git ls-files --stage -- "${finish_exit_fixture}")
-read -r finish_exit_fixture_mode _fixture_blob finish_exit_fixture_stage \
-    finish_exit_fixture_path <<<"${finish_exit_fixture_index}"
-[[ ${finish_exit_fixture_mode} == 100755 \
-    && ${finish_exit_fixture_stage} == 0 \
-    && ${finish_exit_fixture_path} == "${finish_exit_fixture}" ]] \
-    || fail 'reviewed Trixie 98exit-installer fixture index mode is not 100755'
-[[ $(sha256sum "${finish_exit_fixture}" | awk '{print $1}') == "${reviewed_exit_sha256}" ]] \
-    || fail 'reviewed Trixie 98exit-installer fixture differs from upstream'
-grep -Fq 'trap record_exit EXIT' "${finish_exit_wrapper}" \
-    || fail 'traced 98 wrapper does not capture its actual return code'
-grep -Fqx '    exit 11' "${finish_exit_wrapper}" \
-    || fail 'traced 98 wrapper does not preserve live rc=11'
-grep -Fqx 'exit 1' "${finish_exit_wrapper}" \
-    || fail 'traced 98 wrapper does not preserve non-live rc=1'
-grep -Fqx 'exit 0' "${finish_post95_installer}" \
-    || fail 'post-unmount checkpoint is not fail-open'
-if grep -En '(^|[[:space:];&|])u?mount([[:space:]]|$)' \
-    "${finish_post95_installer}" >/dev/null; then
-    fail 'post-unmount diagnostic must not alter mount state'
+    95umount,96edbp-live-installer-exit,97release-dhcp-lease,98exit-installer,99reboot ]] \
+    || fail 'finish-install handoff does not have the reviewed execution order'
+if grep -En \
+    '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|reboot|poweroff|halt|shutdown)([[:space:]]|$)' \
+    "${finish_handoff_installer}" >/dev/null; then
+    fail 'finish-install handoff performs work beyond canonical Live exit'
 fi
 
 grep -Fqx \
