@@ -2,27 +2,12 @@
 
 # TEMPORARY DIAGNOSTIC: remove after the generic finish-install failure is
 # identified. Hook 97 runs after upstream 95umount and immediately before
-# live-installer's 98exit-installer. It records post-unmount state in the d-i
-# root filesystem, then traces 98 without changing its reviewed return codes.
+# live-installer's 98exit-installer. It appends post-unmount state only to the
+# still-writable d-i devtmpfs and never modifies the read-only d-i root.
 
 set -u
 
-trace=${EDBP_FINISH_POST95_TRACE_LOG:-/var/log/edbp-finish-install-post95.log}
-exit_hook=${EDBP_FINISH_EXIT_HOOK:-/usr/lib/finish-install.d/98exit-installer}
-traced_wrapper=${EDBP_FINISH_TRACED_WRAPPER:-/usr/lib/edbp-finish-install-98-wrapper}
-reviewed_exit_mode=755
-reviewed_exit_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
-reviewed_wrapper_sha256=90320515e8130d2ddadac29e17427e24e47031e16dbb9ac89c28fa39c9cfc2b4
-temporary=''
-
-# cleanup is invoked indirectly by the trap below; ShellCheck cannot model
-# that callback path.
-# shellcheck disable=SC2317
-cleanup() {
-    [ -z "${temporary}" ] || rm -f -- "${temporary}" 2>/dev/null || true
-}
-
-trap cleanup EXIT
+trace=${EDBP_FINISH_POST95_TRACE_LOG:-/dev/edbp-finish-install-post95.log}
 
 mount_state() {
     label=$1
@@ -38,25 +23,6 @@ mount_state() {
     printf 'mount_%s=%s\n' "${label}" "${state}"
 }
 
-presence=missing
-mode=unavailable
-signature=unavailable
-if [ -e "${exit_hook}" ] || [ -L "${exit_hook}" ]; then
-    presence=present
-    mode=$(stat -c '%a' "${exit_hook}" 2>/dev/null) || mode=unavailable
-    signature_record=$(sha256sum "${exit_hook}" 2>/dev/null) \
-        || signature_record=''
-    if [ -n "${signature_record}" ]; then
-        signature=${signature_record%% *}
-    fi
-fi
-
-case ${trace} in
-    */*)
-        trace_directory=${trace%/*}
-        mkdir -p -- "${trace_directory}" 2>/dev/null || true
-        ;;
-esac
 umask 077
 {
     printf '%s\n' \
@@ -72,41 +38,6 @@ umask 077
     mount_state dev_pts /dev/pts
     mount_state tmp /tmp
     mount_state run /run
-    printf '%s\n' \
-        "upstream_98_presence=${presence}" \
-        "upstream_98_mode=${mode}" \
-        "upstream_98_sha256=${signature}"
 } >>"${trace}" 2>/dev/null || true
-if [ -f "${trace}" ] && [ ! -L "${trace}" ]; then
-    chmod 0600 "${trace}" 2>/dev/null || true
-fi
-
-if [ "${presence}" != present ] \
-    || [ ! -f "${exit_hook}" ] \
-    || [ -L "${exit_hook}" ] \
-    || [ "${mode}" != "${reviewed_exit_mode}" ] \
-    || [ "${signature}" != "${reviewed_exit_sha256}" ]; then
-    exit 0
-fi
-
-if [ ! -f "${traced_wrapper}" ] \
-    || [ -L "${traced_wrapper}" ] \
-    || [ ! -x "${traced_wrapper}" ]; then
-    exit 0
-fi
-wrapper_signature_record=$(sha256sum "${traced_wrapper}" 2>/dev/null) \
-    || wrapper_signature_record=''
-wrapper_signature=${wrapper_signature_record%% *}
-if [ "${wrapper_signature}" != "${reviewed_wrapper_sha256}" ]; then
-    exit 0
-fi
-
-temporary=$(mktemp "${exit_hook}.edbp.XXXXXX" 2>/dev/null) || exit 0
-if ! cp -- "${traced_wrapper}" "${temporary}" 2>/dev/null \
-    || ! chmod "${reviewed_exit_mode}" "${temporary}" 2>/dev/null \
-    || ! mv -f -- "${temporary}" "${exit_hook}" 2>/dev/null; then
-    exit 0
-fi
-temporary=''
 
 exit 0

@@ -4,7 +4,7 @@
 # reviewed Trixie live-installer 58 hook. Diagnostic write failures must never
 # alter its live rc=11 or non-live rc=1 behavior.
 
-trace=${EDBP_FINISH_POST95_TRACE_LOG:-/var/log/edbp-finish-install-post95.log}
+trace=${EDBP_FINISH_POST95_TRACE_LOG:-/dev/edbp-finish-install-post95.log}
 
 # record_exit is invoked indirectly by the trap below; ShellCheck cannot model
 # that callback path.
