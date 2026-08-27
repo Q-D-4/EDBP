@@ -24,7 +24,7 @@ printf '%s\n' \
     'Image=Next' \
     'FillMode=2' >"${breeze}"
 printf '%s\n' \
-    '<kcfg>' \
+    '<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0">' \
     '  <group name="General">' \
     '    <entry name="launchers" type="StringList">' \
     '      <default>applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser</default>' \

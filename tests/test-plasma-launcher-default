@@ -18,7 +18,7 @@ breeze=${test_directory}/defaults
 taskmanager=${test_directory}/main.xml
 printf '%s\n' '[Wallpaper]' 'Image=Next' >"${breeze}"
 printf '%s\n' \
-    '<kcfg>' \
+    '<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0">' \
     '  <group name="General">' \
     '    <entry name="launchers" type="StringList">' \
     '      <label>Launchers</label>' \
@@ -39,7 +39,7 @@ grep -Fq '<label>Launchers</label>' "${taskmanager}" \
     || fail 'unrelated taskmanager XML was changed'
 
 printf '%s\n' \
-    '<kcfg><group name="General"><entry name="launchers" type="StringList">' \
+    '<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"><group name="General"><entry name="launchers" type="StringList">' \
     '<default>applications:unexpected.desktop</default>' \
     '</entry></group></kcfg>' >"${taskmanager}"
 if "${hook}" "${breeze}" "${taskmanager}" >/dev/null 2>&1; then
