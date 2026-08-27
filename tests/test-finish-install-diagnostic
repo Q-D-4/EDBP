@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2016  # Stub commands expand in their child shell.
 
 set -Eeuo pipefail
 
@@ -10,7 +11,10 @@ fail() {
     exit 1
 }
 
-diagnostic=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
+pre_unmount=config/includes.installer/usr/lib/finish-install.d/94edbp-finish-install-trace
+post_unmount=config/includes.installer/usr/lib/finish-install.d/97edbp-finish-install-post95-trace
+traced_wrapper=config/includes.installer/usr/lib/edbp-finish-install-98-wrapper
+upstream_fixture=tests/98exit-installer.trixie.fixture
 test_directory=$(mktemp -d)
 trap 'rm -rf -- "${test_directory}"' EXIT
 
@@ -25,7 +29,7 @@ trace=${test_directory}/edbp-finish-install-debug.log
 EDBP_FINISH_TRACE_LOG=${trace} \
 EDBP_FINISH_TRACE_SYSLOG=${syslog} \
 LIVE_INSTALLER_MODE=1 \
-    "${diagnostic}"
+    "${pre_unmount}"
 
 grep -Fqx 'checkpoint=94edbp-finish-install-trace' "${trace}" \
     || fail 'hook-94 checkpoint was not persisted'
@@ -46,12 +50,126 @@ fi
 # Diagnostic failures are fail-open and may not alter finish-install semantics.
 EDBP_FINISH_TRACE_LOG=/proc/edbp-finish-install-debug.log \
 EDBP_FINISH_TRACE_SYSLOG=${syslog} \
-    "${diagnostic}" 2>/dev/null
+    "${pre_unmount}" 2>/dev/null
 
 if grep -En \
     'finish-install\.postinst|\.edbp-original|exit "\$\{rc\}"' \
-    "${diagnostic}" >/dev/null; then
+    "${pre_unmount}" >/dev/null; then
     fail 'diagnostic wraps or replaces the active finish-install postinst'
+fi
+
+mountpoint_directory=${test_directory}/bin
+mkdir -p "${mountpoint_directory}"
+printf '%s\n' \
+    '#!/bin/sh' \
+    '[ "$1" = -q ] || exit 2' \
+    'case $2 in' \
+    '    /target|/target/boot|/target/boot/efi) exit 1 ;;' \
+    '    /proc|/sys|/dev|/dev/pts|/tmp|/run) exit 0 ;;' \
+    '    *) exit 2 ;;' \
+    'esac' >"${mountpoint_directory}/mountpoint"
+chmod 0755 "${mountpoint_directory}/mountpoint"
+
+capture_status() {
+    set +e
+    "$@" >/dev/null 2>&1
+    command_status=$?
+    set -e
+}
+
+upstream=${test_directory}/98exit-installer
+cp -- "${upstream_fixture}" "${upstream}"
+chmod 0755 "${upstream}"
+capture_status env -u LIVE_INSTALLER_MODE "${upstream}"
+[[ ${command_status} -eq 1 ]] \
+    || fail 'reviewed upstream non-live fixture does not return 1'
+capture_status env LIVE_INSTALLER_MODE=1 "${upstream}"
+[[ ${command_status} -eq 11 ]] \
+    || fail 'reviewed upstream live fixture does not return 11'
+
+post95_trace=${test_directory}/edbp-finish-install-post95.log
+PATH="${mountpoint_directory}:${PATH}" \
+EDBP_FINISH_POST95_TRACE_LOG=${post95_trace} \
+EDBP_FINISH_EXIT_HOOK=${upstream} \
+EDBP_FINISH_TRACED_WRAPPER=${traced_wrapper} \
+LIVE_INSTALLER_MODE=1 \
+    "${post_unmount}"
+
+grep -Fqx 'checkpoint=97edbp-finish-install-post95-trace' "${post95_trace}" \
+    || fail 'post-95 checkpoint was not recorded'
+grep -Fqx 'LIVE_INSTALLER_MODE=1' "${post95_trace}" \
+    || fail 'post-95 checkpoint lost Live Installer mode'
+for target_mount in target target_boot target_boot_efi; do
+    grep -Fqx "mount_${target_mount}=not-mounted" "${post95_trace}" \
+        || fail "post-95 checkpoint did not record ${target_mount} unmounted"
+done
+for installer_mount in proc sys dev dev_pts tmp run; do
+    grep -Fqx "mount_${installer_mount}=mounted" "${post95_trace}" \
+        || fail "post-95 checkpoint did not record ${installer_mount} mounted"
+done
+grep -Fqx 'upstream_98_presence=present' "${post95_trace}" \
+    || fail 'reviewed upstream 98 presence was not recorded'
+grep -Fqx 'upstream_98_mode=755' "${post95_trace}" \
+    || fail 'reviewed upstream 98 mode was not recorded'
+grep -Fqx \
+    'upstream_98_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808' \
+    "${post95_trace}" \
+    || fail 'reviewed upstream 98 signature was not recorded'
+
+capture_status env \
+    EDBP_FINISH_POST95_TRACE_LOG="${post95_trace}" \
+    LIVE_INSTALLER_MODE=1 "${upstream}"
+[[ ${command_status} -eq 11 ]] \
+    || fail 'traced live 98 did not preserve rc=11'
+grep -Fqx 'checkpoint=98exit-installer-return' "${post95_trace}" \
+    || fail 'traced 98 return checkpoint was not recorded'
+grep -Fqx '98exit-installer_rc=11' "${post95_trace}" \
+    || fail 'actual live 98 rc was not recorded'
+
+capture_status env -u LIVE_INSTALLER_MODE \
+    EDBP_FINISH_POST95_TRACE_LOG="${post95_trace}" "${upstream}"
+[[ ${command_status} -eq 1 ]] \
+    || fail 'traced non-live 98 changed the upstream rc=1 behavior'
+grep -Fqx '98exit-installer_rc=1' "${post95_trace}" \
+    || fail 'actual non-live 98 rc was not recorded'
+
+# Trace write failures must preserve both reviewed return paths.
+capture_status env \
+    EDBP_FINISH_POST95_TRACE_LOG=/proc/edbp-finish-install-post95.log \
+    LIVE_INSTALLER_MODE=1 "${upstream}"
+[[ ${command_status} -eq 11 ]] \
+    || fail 'trace failure changed the live 98 return code'
+capture_status env -u LIVE_INSTALLER_MODE \
+    EDBP_FINISH_POST95_TRACE_LOG=/proc/edbp-finish-install-post95.log \
+    "${upstream}"
+[[ ${command_status} -eq 1 ]] \
+    || fail 'trace failure changed the non-live 98 return code'
+
+# An incompatible upstream hook must remain byte-for-byte untouched.
+incompatible=${test_directory}/98exit-installer-incompatible
+printf '%s\n' '#!/bin/sh' 'exit 42' >"${incompatible}"
+chmod 0755 "${incompatible}"
+incompatible_before=$(sha256sum "${incompatible}")
+EDBP_FINISH_POST95_TRACE_LOG=${test_directory}/incompatible.log \
+EDBP_FINISH_EXIT_HOOK=${incompatible} \
+EDBP_FINISH_TRACED_WRAPPER=${traced_wrapper} \
+    "${post_unmount}"
+incompatible_after=$(sha256sum "${incompatible}")
+[[ ${incompatible_after} == "${incompatible_before}" ]] \
+    || fail 'incompatible upstream 98 was not rejected fail-closed'
+capture_status "${incompatible}"
+[[ ${command_status} -eq 42 ]] \
+    || fail 'failed diagnostic changed an incompatible upstream hook'
+
+# Even a completely unwritable diagnostic path must leave hook 97 fail-open.
+EDBP_FINISH_POST95_TRACE_LOG=/proc/edbp-finish-install-post95.log \
+EDBP_FINISH_EXIT_HOOK=${test_directory}/missing-98 \
+EDBP_FINISH_TRACED_WRAPPER=${traced_wrapper} \
+    "${post_unmount}" 2>/dev/null
+
+if grep -En '(^|[[:space:];&|])u?mount([[:space:]]|$)' \
+    "${post_unmount}" >/dev/null; then
+    fail 'post-95 diagnostic alters installer mount state'
 fi
 
 printf '%s\n' 'Finish-install diagnostic regression passed.'
