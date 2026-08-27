@@ -1,27 +1,76 @@
 #!/bin/sh
 
-# Debian live-installer 58 exits finish-install before 99reboot when the
-# launcher supplies LIVE_INSTALLER_MODE. EDBP deliberately uses Debian's
-# normal completion and reboot path, so neutralize only that reviewed hook.
+# The nested installer shares the Live host PID namespace. Debian's rootskel
+# eventually invokes /sbin/reboot, but BusyBox reboot sends SIGTERM to PID 1;
+# systemd interprets that as daemon-reexec, not reboot. Prepare both Live-only
+# compatibility changes before 95umount makes the installer root read-only.
 
 stock_exit_hook=/usr/lib/finish-install.d/98exit-installer
+reboot_path=/sbin/reboot
+busybox_path=/bin/busybox
+systemd_pid=1
+pid1_comm_path=/proc/${systemd_pid}/comm
+systemd_reboot_signal=39
+reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'
 reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
-reviewed_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
-temporary=
+reviewed_exit_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
+reviewed_reboot_wrapper_sha256=fcaa29de5e1b76947db266501d80ba70dee80cc598a28bae433a64aa2cb713d2
+exit_replacement=
+exit_backup=
+reboot_replacement=
+exit_replaced=0
+reboot_replaced=0
+
+reviewed_regular_0755() {
+    checked_path=$1
+    checked_sha256=$2
+
+    [ -f "${checked_path}" ] && [ ! -L "${checked_path}" ] \
+        && [ -x "${checked_path}" ] || return 1
+    checked_listing=$(LC_ALL=C ls -ld "${checked_path}" 2>/dev/null) \
+        || return 1
+    [ "${checked_listing%% *}" = '-rwxr-xr-x' ] || return 1
+    checked_digest=$(sha256sum "${checked_path}" 2>/dev/null) || return 1
+    [ "${checked_digest%% *}" = "${checked_sha256}" ]
+}
+
+restore_exit_hook() {
+    [ "${exit_replaced}" -eq 1 ] || return 0
+    [ "${reboot_replaced}" -eq 0 ] || return 0
+    [ -n "${exit_backup}" ] || return 1
+
+    mv -f "${exit_backup}" "${stock_exit_hook}" || return 1
+    exit_backup=
+    exit_replaced=0
+    reviewed_regular_0755 \
+        "${stock_exit_hook}" "${reviewed_stock_sha256}"
+}
 
 # shellcheck disable=SC2317  # Invoked by the EXIT trap below.
 cleanup() {
-    if [ -n "${temporary}" ]; then
-        rm -f "${temporary}" >/dev/null 2>&1 || :
+    if ! restore_exit_hook; then
+        printf '%s\n' \
+            'ERROR: failed to roll back the Live exit hook; teardown remains blocked' \
+            >&2
+    fi
+    if [ -n "${exit_replacement}" ]; then
+        rm -f "${exit_replacement}" >/dev/null 2>&1 || :
+    fi
+    if [ -n "${reboot_replacement}" ]; then
+        rm -f "${reboot_replacement}" >/dev/null 2>&1 || :
+    fi
+    if [ -n "${exit_backup}" ] \
+        && { [ "${exit_replaced}" -eq 0 ] || [ "${reboot_replaced}" -eq 1 ]; }; then
+        rm -f "${exit_backup}" >/dev/null 2>&1 || :
     fi
 }
 
 fail_closed() {
-    printf 'ERROR: cannot enable the reviewed Debian finish-install path: %s\n' "$1" >&2
+    printf 'ERROR: cannot enable the reviewed nested-installer exit path: %s\n' "$1" >&2
     exit 10
 }
 
-# Non-Live Debian Installer runs must retain the upstream hook unchanged.
+# Non-Live Debian Installer runs retain both upstream files byte-for-byte.
 if [ -z "${LIVE_INSTALLER_MODE:-}" ]; then
     exit 0
 fi
@@ -29,53 +78,145 @@ fi
 trap cleanup 0
 trap 'exit 10' 1 2 15
 
-if [ ! -f "${stock_exit_hook}" ] || [ -L "${stock_exit_hook}" ] \
-    || [ ! -x "${stock_exit_hook}" ]; then
-    fail_closed 'live-installer 98exit-installer is not an executable regular file'
+reviewed_regular_0755 "${stock_exit_hook}" "${reviewed_stock_sha256}" \
+    || fail_closed 'live-installer 58 hook 98 differs from the reviewed file'
+
+if [ ! -L "${reboot_path}" ]; then
+    fail_closed 'stock reboot path is not the reviewed BusyBox symlink'
+fi
+if ! reboot_listing=$(LC_ALL=C ls -ld "${reboot_path}" 2>/dev/null); then
+    fail_closed 'stock reboot symlink cannot be read'
+fi
+if [ "${reboot_listing%% *}" != 'lrwxrwxrwx' ]; then
+    fail_closed 'stock reboot symlink mode is not the reviewed mode'
+fi
+case "${reboot_listing}" in
+    *" ${reboot_path} -> ${busybox_path}")
+        ;;
+    *)
+        fail_closed 'stock reboot symlink does not target the reviewed BusyBox path'
+        ;;
+esac
+
+if [ ! -f "${busybox_path}" ] || [ -L "${busybox_path}" ] \
+    || [ ! -x "${busybox_path}" ]; then
+    fail_closed 'reviewed BusyBox binary is not an executable regular file'
+fi
+if ! busybox_listing=$(LC_ALL=C ls -ld "${busybox_path}" 2>/dev/null); then
+    fail_closed 'BusyBox binary mode cannot be read'
+fi
+if [ "${busybox_listing%% *}" != '-rwxr-xr-x' ]; then
+    fail_closed 'BusyBox binary mode is not 0755'
+fi
+if ! busybox_help=$("${busybox_path}" --help 2>&1); then
+    fail_closed 'BusyBox version banner cannot be read'
+fi
+case "${busybox_help}" in
+    "${reviewed_busybox_banner}"*)
+        ;;
+    *)
+        fail_closed 'BusyBox version differs from the reviewed Trixie rebuild'
+        ;;
+esac
+if ! busybox_applets=$("${busybox_path}" --list 2>/dev/null); then
+    fail_closed 'BusyBox applet list cannot be read'
+fi
+busybox_newline='
+'
+case "${busybox_newline}${busybox_applets}${busybox_newline}" in
+    *"${busybox_newline}kill${busybox_newline}"*)
+        ;;
+    *)
+        fail_closed 'BusyBox kill applet is unavailable'
+        ;;
+esac
+case "${busybox_newline}${busybox_applets}${busybox_newline}" in
+    *"${busybox_newline}reboot${busybox_newline}"*)
+        ;;
+    *)
+        fail_closed 'BusyBox reboot applet is unavailable'
+        ;;
+esac
+
+# On Trixie amd64 SIGRTMIN is 34, so systemd's documented SIGRTMIN+5 normal
+# reboot request is signal 39. The udeb omits symbolic RTMIN+n parsing, while
+# BusyBox's unconditional numeric parser accepts 39. This probe lists only; it
+# never sends a signal.
+"${busybox_path}" kill -l "${systemd_reboot_signal}" >/dev/null 2>&1 \
+    || fail_closed 'BusyBox kill does not accept numeric signal 39'
+
+if [ ! -r "${pid1_comm_path}" ] || [ -L "${pid1_comm_path}" ]; then
+    fail_closed 'PID 1 identity cannot be read safely'
+fi
+IFS= read -r pid1_comm <"${pid1_comm_path}" \
+    || fail_closed 'PID 1 identity cannot be read'
+if [ "${pid1_comm}" != systemd ]; then
+    fail_closed 'PID 1 is not the outer Live systemd manager'
 fi
 
-if ! stock_listing=$(LC_ALL=C ls -ld "${stock_exit_hook}" 2>/dev/null); then
-    fail_closed 'live-installer 98exit-installer mode cannot be read'
-fi
-if [ "${stock_listing%% *}" != '-rwxr-xr-x' ]; then
-    fail_closed 'live-installer 98exit-installer mode is not 0755'
-fi
-
-if ! stock_digest=$(sha256sum "${stock_exit_hook}" 2>/dev/null); then
-    fail_closed 'live-installer 98exit-installer digest cannot be read'
-fi
-if [ "${stock_digest%% *}" != "${reviewed_stock_sha256}" ]; then
-    fail_closed 'live-installer 98exit-installer differs from version 58'
-fi
-
-temporary=$(mktemp "${stock_exit_hook}.edbp.XXXXXX") \
-    || fail_closed 'temporary replacement cannot be created'
+# Prepare and verify every object before changing either upstream path.
+exit_replacement=$(mktemp "${stock_exit_hook}.edbp.XXXXXX") \
+    || fail_closed 'temporary hook 98 replacement cannot be created'
 if ! printf '%s\n' \
     '#!/bin/sh -e' \
     '' \
     '# EDBP preserves LIVE_INSTALLER_MODE but selects the normal 99reboot path.' \
-    'exit 0' >"${temporary}"; then
-    fail_closed 'temporary replacement cannot be written'
+    'exit 0' >"${exit_replacement}"; then
+    fail_closed 'temporary hook 98 replacement cannot be written'
 fi
-chmod 0755 "${temporary}" \
-    || fail_closed 'temporary replacement mode cannot be set'
+chmod 0755 "${exit_replacement}" \
+    || fail_closed 'temporary hook 98 replacement mode cannot be set'
+reviewed_regular_0755 \
+    "${exit_replacement}" "${reviewed_exit_replacement_sha256}" \
+    || fail_closed 'temporary hook 98 replacement differs from reviewed content'
 
-if ! replacement_listing=$(LC_ALL=C ls -ld "${temporary}" 2>/dev/null); then
-    fail_closed 'temporary replacement mode cannot be read'
-fi
-if [ "${replacement_listing%% *}" != '-rwxr-xr-x' ]; then
-    fail_closed 'temporary replacement mode is not 0755'
-fi
+exit_backup=$(mktemp "${stock_exit_hook}.edbp-backup.XXXXXX") \
+    || fail_closed 'temporary hook 98 backup cannot be created'
+cp "${stock_exit_hook}" "${exit_backup}" \
+    || fail_closed 'temporary hook 98 backup cannot be copied'
+chmod 0755 "${exit_backup}" \
+    || fail_closed 'temporary hook 98 backup mode cannot be set'
+reviewed_regular_0755 "${exit_backup}" "${reviewed_stock_sha256}" \
+    || fail_closed 'temporary hook 98 backup differs from reviewed stock'
 
-if ! replacement_digest=$(sha256sum "${temporary}" 2>/dev/null); then
-    fail_closed 'temporary replacement digest cannot be read'
+reboot_replacement=$(mktemp "${reboot_path}.edbp.XXXXXX") \
+    || fail_closed 'temporary reboot compatibility wrapper cannot be created'
+if ! printf '%s\n' \
+    '#!/bin/sh' \
+    '' \
+    '# Debian Trixie amd64 systemd maps SIGRTMIN+5 to numeric signal 39.' \
+    'exec /bin/busybox kill -39 1' >"${reboot_replacement}"; then
+    fail_closed 'temporary reboot compatibility wrapper cannot be written'
 fi
-if [ "${replacement_digest%% *}" != "${reviewed_replacement_sha256}" ]; then
-    fail_closed 'temporary replacement content differs from the reviewed policy'
-fi
+chmod 0755 "${reboot_replacement}" \
+    || fail_closed 'temporary reboot compatibility wrapper mode cannot be set'
+reviewed_regular_0755 \
+    "${reboot_replacement}" "${reviewed_reboot_wrapper_sha256}" \
+    || fail_closed 'temporary reboot compatibility wrapper differs from reviewed content'
 
-mv -f "${temporary}" "${stock_exit_hook}" \
-    || fail_closed 'reviewed replacement cannot be installed atomically'
-temporary=
+# Two paths cannot be renamed atomically together. Block catchable termination
+# signals across the small commit window, install hook 98 first, and retain its
+# verified backup until the reboot wrapper commits. If the second rename fails,
+# restore hook 98 so its rc=11 continues to block teardown and 99reboot.
+trap '' 1 2 15
+exit_replaced=1
+if ! mv -f "${exit_replacement}" "${stock_exit_hook}"; then
+    exit_replaced=0
+    trap 'exit 10' 1 2 15
+    fail_closed 'reviewed hook 98 replacement cannot be installed atomically'
+fi
+exit_replacement=
+
+if ! mv -f "${reboot_replacement}" "${reboot_path}"; then
+    if ! restore_exit_hook; then
+        printf '%s\n' \
+            'ERROR: hook 98 rollback failed; teardown remains blocked' >&2
+    fi
+    trap 'exit 10' 1 2 15
+    fail_closed 'reviewed reboot wrapper cannot be installed atomically'
+fi
+reboot_replacement=
+reboot_replaced=1
+trap 'exit 10' 1 2 15
 
 exit 0

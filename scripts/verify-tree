@@ -384,6 +384,41 @@ grep -Fqx \
     'reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808' \
     "${finish_reboot_policy}" \
     || fail 'normal reboot policy does not pin live-installer 58 hook 98'
+grep -Fqx \
+    'reviewed_exit_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin its reviewed hook 98 no-op'
+grep -Fqx \
+    'reviewed_reboot_wrapper_sha256=fcaa29de5e1b76947db266501d80ba70dee80cc598a28bae433a64aa2cb713d2' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin its reviewed systemd wrapper'
+grep -Fqx \
+    "reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'" \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin the observed Trixie BusyBox rebuild'
+grep -Fqx 'systemd_pid=1' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not target the reviewed PID 1'
+grep -Fqx 'systemd_reboot_signal=39' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin systemd SIGRTMIN+5 to signal 39'
+grep -Fqx \
+    "    'exec /bin/busybox kill -39 1' >\"\${reboot_replacement}\"; then" \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not stage the reviewed systemd request'
+[[ $(grep -Fc 'exec /bin/busybox kill -39 1' "${finish_reboot_policy}") -eq 1 ]] \
+    || fail 'normal reboot policy duplicates the final reboot request'
+grep -Fq 'pid1_comm_path=/proc/${systemd_pid}/comm' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not inspect PID 1 through procfs'
+grep -Fq 'if [ "${pid1_comm}" != systemd ]; then' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not require systemd PID 1'
+grep -Fq 'mv -f "${exit_replacement}" "${stock_exit_hook}"' \
+    "${finish_reboot_policy}" \
+    || fail 'hook 98 no-op is not installed atomically'
+grep -Fq 'mv -f "${reboot_replacement}" "${reboot_path}"' \
+    "${finish_reboot_policy}" \
+    || fail 'systemd reboot wrapper is not installed atomically'
+grep -Fq 'mv -f "${exit_backup}" "${stock_exit_hook}"' \
+    "${finish_reboot_policy}" \
+    || fail 'partial compatibility commit cannot roll back hook 98'
 grep -Fqx '    exit 10' "${finish_reboot_policy}" \
     || fail 'normal reboot policy does not fail closed before teardown'
 finish_hook_order=$(printf '%s\n' \
@@ -408,9 +443,15 @@ if grep -REn \
 fi
 if grep -Ev '^[[:space:]]*#' "${finish_reboot_policy}" \
     | grep -En \
-        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(stat|mountpoint|apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|reboot|poweroff|halt|shutdown|systemctl)([[:space:]]|$)' \
+        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(stat|mountpoint|apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|poweroff|halt|shutdown|systemctl)([[:space:]]|$)|reboot[[:space:]]+-f' \
         >/dev/null; then
-    fail 'normal reboot policy performs unrelated target, mount, package, network, or reboot work'
+    fail 'normal reboot policy performs unrelated target, mount, package, network, or forced reboot work'
+fi
+if grep -Ev '^[[:space:]]*#' "${finish_reboot_policy}" \
+    | grep -En \
+        '(^|[;&|])[[:space:]]*(if[[:space:]]+)?(![[:space:]]+)?(/sbin/)?reboot([[:space:];&|]|$)' \
+        >/dev/null; then
+    fail 'normal reboot policy invokes reboot before Debian teardown'
 fi
 
 grep -Fqx \

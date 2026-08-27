@@ -23,12 +23,14 @@ policy=config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal
 obsolete_handoff=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
 preseed=config/includes.installer/preseed.cfg.in
 reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
-reviewed_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
+reviewed_exit_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
+reviewed_reboot_wrapper_sha256=fcaa29de5e1b76947db266501d80ba70dee80cc598a28bae433a64aa2cb713d2
+reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'
 test_directory=$(mktemp -d)
 trap 'rm -rf -- "${test_directory}"' EXIT
 
 [[ -f ${policy} && ! -L ${policy} && -x ${policy} ]] \
-    || fail 'normal-reboot policy is not an executable regular file'
+    || fail 'nested-installer compatibility policy is not an executable regular file'
 [[ ! -e ${obsolete_handoff} && ! -L ${obsolete_handoff} ]] \
     || fail 'obsolete rc=11 Live handoff remains in production'
 
@@ -41,8 +43,8 @@ actual_order=$(printf '%s\n' \
     98exit-installer \
     99reboot \
     | LC_ALL=C sort | paste -sd, -)
-expected_order=20final-message,94random-seed,94z-edbp-enable-normal-reboot,95umount,97release-dhcp-lease,98exit-installer,99reboot
-[[ ${actual_order} == "${expected_order}" ]] \
+expected_hook_order=20final-message,94random-seed,94z-edbp-enable-normal-reboot,95umount,97release-dhcp-lease,98exit-installer,99reboot
+[[ ${actual_order} == "${expected_hook_order}" ]] \
     || fail 'production policy is not after upstream 94random-seed and before 95umount'
 
 if awk '$1 == "d-i" && $2 == "finish-install/reboot_in_progress" { found = 1 } END { exit !found }' \
@@ -61,25 +63,64 @@ if grep -REn \
 fi
 
 grep -Fqx "reviewed_stock_sha256=${reviewed_stock_sha256}" "${policy}" \
-    || fail 'policy does not pin live-installer 58 98exit-installer'
-grep -Fqx "reviewed_replacement_sha256=${reviewed_replacement_sha256}" "${policy}" \
-    || fail 'policy does not pin the reviewed no-op replacement'
+    || fail 'policy does not pin live-installer 58 hook 98'
+grep -Fqx \
+    "reviewed_exit_replacement_sha256=${reviewed_exit_replacement_sha256}" \
+    "${policy}" \
+    || fail 'policy does not pin the reviewed no-op hook 98 replacement'
+grep -Fqx \
+    "reviewed_reboot_wrapper_sha256=${reviewed_reboot_wrapper_sha256}" \
+    "${policy}" \
+    || fail 'policy does not pin the reviewed final reboot wrapper'
+grep -Fqx "reviewed_busybox_banner='${reviewed_busybox_banner}'" "${policy}" \
+    || fail 'policy does not pin the observed Trixie BusyBox rebuild'
+grep -Fqx 'systemd_pid=1' "${policy}" \
+    || fail 'reboot compatibility is not limited to PID 1'
+grep -Fqx 'systemd_reboot_signal=39' "${policy}" \
+    || fail 'systemd normal-reboot signal is not pinned to reviewed amd64 value 39'
 grep -Fqx 'if [ -z "${LIVE_INSTALLER_MODE:-}" ]; then' "${policy}" \
     || fail 'policy is not limited to the nested Live installer'
 grep -Fqx '    exit 10' "${policy}" \
-    || fail 'unexpected upstream state does not stop before teardown'
-grep -Fq 'temporary=$(mktemp "${stock_exit_hook}.edbp.XXXXXX")' "${policy}" \
-    || fail 'replacement is not prepared beside upstream 98'
-grep -Fq 'mv -f "${temporary}" "${stock_exit_hook}"' "${policy}" \
-    || fail 'replacement is not installed with one atomic rename'
-if grep -Fq '>"${stock_exit_hook}"' "${policy}"; then
-    fail 'policy writes directly into upstream 98 instead of replacing atomically'
+    || fail 'unexpected runtime state does not stop before teardown'
+grep -Fqx "    'exec /bin/busybox kill -39 1' >\"\${reboot_replacement}\"; then" \
+    "${policy}" \
+    || fail 'reviewed wrapper does not request systemd normal reboot exactly'
+[[ $(grep -Fc 'exec /bin/busybox kill -39 1' "${policy}") -eq 1 ]] \
+    || fail 'reviewed normal-reboot request is duplicated in production policy'
+grep -Fqx \
+    "\"\${busybox_path}\" kill -l \"\${systemd_reboot_signal}\" >/dev/null 2>&1 \\" \
+    "${policy}" \
+    || fail 'policy does not harmlessly verify BusyBox numeric-signal parsing'
+grep -Fq 'pid1_comm_path=/proc/${systemd_pid}/comm' "${policy}" \
+    || fail 'policy does not verify the actual PID 1 identity through procfs'
+grep -Fq 'if [ "${pid1_comm}" != systemd ]; then' "${policy}" \
+    || fail 'policy does not require the outer systemd manager'
+grep -Fq 'exit_backup=$(mktemp "${stock_exit_hook}.edbp-backup.XXXXXX")' \
+    "${policy}" \
+    || fail 'policy does not stage a verified rollback copy of stock hook 98'
+grep -Fq 'cp "${stock_exit_hook}" "${exit_backup}"' "${policy}" \
+    || fail 'policy does not copy stock hook 98 into its rollback object'
+grep -Fq 'mv -f "${exit_replacement}" "${stock_exit_hook}"' "${policy}" \
+    || fail 'hook 98 replacement is not committed atomically'
+grep -Fq 'mv -f "${reboot_replacement}" "${reboot_path}"' "${policy}" \
+    || fail 'reboot wrapper is not committed atomically'
+grep -Fq 'mv -f "${exit_backup}" "${stock_exit_hook}"' "${policy}" \
+    || fail 'partial commit cannot restore stock hook 98 atomically'
+if grep -Fq '>"${stock_exit_hook}"' "${policy}" \
+    || grep -Fq '>"${reboot_path}"' "${policy}"; then
+    fail 'policy writes directly into an upstream path instead of renaming atomically'
 fi
 if grep -Ev '^[[:space:]]*#' "${policy}" \
     | grep -En \
-        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(stat|mountpoint|apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|ip|ifconfig|nmcli|networkctl|dhclient|udhcpc|ping|reboot|poweroff|halt|shutdown|systemctl)([[:space:]]|$)' \
+        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|ip|ifconfig|nmcli|networkctl|dhclient|udhcpc|ping|poweroff|halt|shutdown|systemctl)([[:space:]]|$)|reboot[[:space:]]+-f' \
         >/dev/null; then
-    fail 'normal-reboot policy performs unrelated target, mount, package, network, or reboot work'
+    fail 'policy performs unrelated target, mount, package, network, or forced reboot work'
+fi
+if grep -Ev '^[[:space:]]*#' "${policy}" \
+    | grep -En \
+        '(^|[;&|])[[:space:]]*(if[[:space:]]+)?(![[:space:]]+)?(/sbin/)?reboot([[:space:];&|]|$)' \
+        >/dev/null; then
+    fail 'pre-95 policy invokes reboot instead of preparing the later command'
 fi
 
 production_finish_files=$(find \
@@ -99,19 +140,56 @@ write_reviewed_stock() {
     chmod 0755 "${destination}"
 }
 
+write_busybox_stub() {
+    local destination=$1
+
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'case "$*" in' \
+        '    "--help")' \
+        "        printf '%s\\n' '${reviewed_busybox_banner}'" \
+        '        exit 0' \
+        '        ;;' \
+        '    "--list")' \
+        "        printf '%s\\n' kill reboot" \
+        '        exit 0' \
+        '        ;;' \
+        '    "kill -l 39")' \
+        '        exit 0' \
+        '        ;;' \
+        '    *)' \
+        '        exit 1' \
+        '        ;;' \
+        'esac' \
+        >"${destination}"
+    chmod 0755 "${destination}"
+}
+
 scenario_directory=
-scenario_fixture=
+scenario_exit=
+scenario_busybox=
+scenario_reboot=
+scenario_pid1=
 scenario_runner=
 prepare_scenario() {
     local name=$1
 
     scenario_directory=${test_directory}/${name}
-    scenario_fixture=${scenario_directory}/98exit-installer
+    scenario_exit=${scenario_directory}/98exit-installer
+    scenario_busybox=${scenario_directory}/bin/busybox
+    scenario_reboot=${scenario_directory}/sbin/reboot
+    scenario_pid1=${scenario_directory}/proc-1-comm
     scenario_runner=${scenario_directory}/${policy##*/}
-    mkdir "${scenario_directory}"
-    write_reviewed_stock "${scenario_fixture}"
+    mkdir -p "${scenario_directory}/bin" "${scenario_directory}/sbin"
+    write_reviewed_stock "${scenario_exit}"
+    write_busybox_stub "${scenario_busybox}"
+    ln -s "${scenario_busybox}" "${scenario_reboot}"
+    printf '%s\n' systemd >"${scenario_pid1}"
     sed \
-        "s|^stock_exit_hook=.*$|stock_exit_hook=${scenario_fixture}|" \
+        -e "s|^stock_exit_hook=.*$|stock_exit_hook=${scenario_exit}|" \
+        -e "s|^reboot_path=.*$|reboot_path=${scenario_reboot}|" \
+        -e "s|^busybox_path=.*$|busybox_path=${scenario_busybox}|" \
+        -e "s|^pid1_comm_path=.*$|pid1_comm_path=${scenario_pid1}|" \
         "${policy}" >"${scenario_runner}"
     chmod 0755 "${scenario_runner}"
 }
@@ -122,79 +200,169 @@ assert_stock_unchanged() {
 
     digest=$(sha256sum "${path}")
     [[ ${digest%% *} == "${reviewed_stock_sha256}" ]] \
-        || fail 'failed or non-live preparation changed upstream 98 bytes'
+        || fail 'failed or non-Live preparation changed stock hook 98 bytes'
+}
+
+assert_reboot_symlink_unchanged() {
+    local path=$1
+    local expected_target=$2
+
+    [[ -L ${path} ]] \
+        || fail 'failed or non-Live preparation replaced the stock reboot symlink'
+    [[ $(readlink "${path}") == "${expected_target}" ]] \
+        || fail 'failed or non-Live preparation changed the stock reboot target'
 }
 
 assert_no_temporary() {
     local directory=$1
 
-    if find "${directory}" -maxdepth 1 -name '98exit-installer.edbp.*' \
-        -print -quit | grep -q .; then
-        fail 'failed preparation left a temporary hook beside upstream 98'
+    if find "${directory}" -name '*.edbp.*' -print -quit | grep -q .; then
+        fail 'preparation left a temporary compatibility object behind'
     fi
 }
 
+assert_failed_scenario_unchanged() {
+    local expected_reboot_target=$1
+
+    [[ ${command_status} -eq 10 ]] \
+        || fail 'invalid or failed preparation did not return fail-closed rc=10'
+    assert_stock_unchanged "${scenario_exit}"
+    assert_reboot_symlink_unchanged "${scenario_reboot}" "${expected_reboot_target}"
+    assert_no_temporary "${scenario_directory}"
+}
+
 prepare_scenario accepted
-assert_stock_unchanged "${scenario_fixture}"
+kill_log=${scenario_directory}/kill.log
+[[ ! -e ${kill_log} ]] \
+    || fail 'test setup unexpectedly contains a reboot request'
 capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
 [[ ${command_status} -eq 0 ]] \
-    || fail 'exact reviewed upstream 98 was not accepted in Live mode'
-replacement_digest=$(sha256sum "${scenario_fixture}")
-[[ ${replacement_digest%% *} == "${reviewed_replacement_sha256}" ]] \
-    || fail 'accepted upstream 98 was not replaced with reviewed content'
-replacement_listing=$(LC_ALL=C ls -ld "${scenario_fixture}")
-[[ ${replacement_listing%% *} == -rwxr-xr-x ]] \
-    || fail 'reviewed replacement mode is not exactly 0755'
-capture_status env LIVE_INSTALLER_MODE=1 "${scenario_fixture}"
+    || fail 'exact reviewed Live environment was not accepted'
+exit_digest=$(sha256sum "${scenario_exit}")
+[[ ${exit_digest%% *} == "${reviewed_exit_replacement_sha256}" ]] \
+    || fail 'accepted stock hook 98 was not replaced with reviewed no-op content'
+exit_listing=$(LC_ALL=C ls -ld "${scenario_exit}")
+[[ ${exit_listing%% *} == -rwxr-xr-x ]] \
+    || fail 'reviewed hook 98 replacement mode is not exactly 0755'
+[[ -f ${scenario_reboot} && ! -L ${scenario_reboot} ]] \
+    || fail 'accepted stock reboot symlink was not replaced by a regular wrapper'
+reboot_digest=$(sha256sum "${scenario_reboot}")
+[[ ${reboot_digest%% *} == "${reviewed_reboot_wrapper_sha256}" ]] \
+    || fail 'installed final reboot wrapper differs from reviewed content'
+reboot_listing=$(LC_ALL=C ls -ld "${scenario_reboot}")
+[[ ${reboot_listing%% *} == -rwxr-xr-x ]] \
+    || fail 'reviewed final reboot wrapper mode is not exactly 0755'
+[[ ! -e ${kill_log} ]] \
+    || fail 'pre-95 policy executed the future reboot request'
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_exit}"
 [[ ${command_status} -eq 0 ]] \
-    || fail 'neutralized 98 did not continue the Live finish sequence'
+    || fail 'neutralized hook 98 did not continue the Live finish sequence'
+assert_no_temporary "${scenario_directory}"
+
+# Never execute the installed production wrapper in this test: it names PID 1.
+# Replace only its reviewed BusyBox path in a test copy, then prove exact argv and
+# exec status propagation using a harmless logger stub.
+wrapper_kill_stub=${scenario_directory}/wrapper-kill-stub
+wrapper_safe_copy=${scenario_directory}/reviewed-wrapper-safe-test-copy
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\\n" "$*" >"${EDBP_TEST_KILL_LOG}"' \
+    'exit "${EDBP_TEST_KILL_STATUS}"' \
+    >"${wrapper_kill_stub}"
+chmod 0755 "${wrapper_kill_stub}"
+sed "s|/bin/busybox|${wrapper_kill_stub}|" \
+    "${scenario_reboot}" >"${wrapper_safe_copy}"
+chmod 0755 "${wrapper_safe_copy}"
+capture_status env \
+    EDBP_TEST_KILL_LOG="${kill_log}" \
+    EDBP_TEST_KILL_STATUS=0 \
+    "${wrapper_safe_copy}"
+[[ ${command_status} -eq 0 && $(<"${kill_log}") == 'kill -39 1' ]] \
+    || fail 'reviewed wrapper did not invoke the stub with exact normal-reboot argv'
+capture_status env \
+    EDBP_TEST_KILL_LOG="${kill_log}" \
+    EDBP_TEST_KILL_STATUS=7 \
+    "${wrapper_safe_copy}"
+[[ ${command_status} -eq 7 && $(<"${kill_log}") == 'kill -39 1' ]] \
+    || fail 'reviewed exec wrapper did not preserve the stub kill exit status'
 
 prepare_scenario nonlive
+printf '%s\n' init >"${scenario_pid1}"
+nonlive_target=${scenario_busybox}
 capture_status env -u LIVE_INSTALLER_MODE "${scenario_runner}"
 [[ ${command_status} -eq 0 ]] \
     || fail 'policy changed non-Live hook dispatch'
-assert_stock_unchanged "${scenario_fixture}"
-capture_status env -u LIVE_INSTALLER_MODE "${scenario_fixture}"
+assert_stock_unchanged "${scenario_exit}"
+assert_reboot_symlink_unchanged "${scenario_reboot}" "${nonlive_target}"
+assert_no_temporary "${scenario_directory}"
+capture_status env -u LIVE_INSTALLER_MODE "${scenario_exit}"
 [[ ${command_status} -eq 1 ]] \
-    || fail 'non-Live upstream 98 behavior was not preserved exactly'
+    || fail 'non-Live stock hook 98 behavior was not preserved exactly'
 
-prepare_scenario altered
-printf '%s\n' '# altered' >>"${scenario_fixture}"
-altered_before=$(sha256sum "${scenario_fixture}")
+prepare_scenario altered-stock
+altered_reboot_target=${scenario_busybox}
+printf '%s\n' '# altered' >>"${scenario_exit}"
+altered_stock_before=$(sha256sum "${scenario_exit}")
 capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
 [[ ${command_status} -eq 10 ]] \
-    || fail 'altered upstream 98 did not fail closed with rc=10'
-altered_after=$(sha256sum "${scenario_fixture}")
-[[ ${altered_after%% *} == "${altered_before%% *}" ]] \
-    || fail 'altered upstream 98 was changed after validation failure'
+    || fail 'altered stock hook 98 did not fail closed with rc=10'
+altered_stock_after=$(sha256sum "${scenario_exit}")
+[[ ${altered_stock_after%% *} == "${altered_stock_before%% *}" ]] \
+    || fail 'altered stock hook 98 changed after validation failure'
+assert_reboot_symlink_unchanged "${scenario_reboot}" "${altered_reboot_target}"
 assert_no_temporary "${scenario_directory}"
 
-prepare_scenario wrong-mode
-chmod 0775 "${scenario_fixture}"
+prepare_scenario wrong-stock-mode
+wrong_stock_reboot_target=${scenario_busybox}
+chmod 0775 "${scenario_exit}"
 capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
 [[ ${command_status} -eq 10 ]] \
-    || fail 'wrong upstream 98 mode did not fail closed with rc=10'
-assert_stock_unchanged "${scenario_fixture}"
-wrong_mode_listing=$(LC_ALL=C ls -ld "${scenario_fixture}")
-[[ ${wrong_mode_listing%% *} == -rwxrwxr-x ]] \
-    || fail 'mode validation failure changed upstream 98 mode'
+    || fail 'wrong stock hook 98 mode did not fail closed with rc=10'
+assert_stock_unchanged "${scenario_exit}"
+wrong_stock_listing=$(LC_ALL=C ls -ld "${scenario_exit}")
+[[ ${wrong_stock_listing%% *} == -rwxrwxr-x ]] \
+    || fail 'stock hook mode validation changed its original mode'
+assert_reboot_symlink_unchanged "${scenario_reboot}" "${wrong_stock_reboot_target}"
+assert_no_temporary "${scenario_directory}"
 
-scenario_directory=${test_directory}/symlink
-scenario_fixture=${scenario_directory}/98exit-installer
-scenario_runner=${scenario_directory}/${policy##*/}
-mkdir "${scenario_directory}"
-write_reviewed_stock "${scenario_directory}/stock-target"
-ln -s stock-target "${scenario_fixture}"
-sed \
-    "s|^stock_exit_hook=.*$|stock_exit_hook=${scenario_fixture}|" \
-    "${policy}" >"${scenario_runner}"
-chmod 0755 "${scenario_runner}"
+prepare_scenario wrong-reboot-target
+rm "${scenario_reboot}"
+ln -s "${scenario_directory}/unexpected-busybox" "${scenario_reboot}"
+wrong_reboot_target=$(readlink "${scenario_reboot}")
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${wrong_reboot_target}"
+
+prepare_scenario regular-reboot
+rm "${scenario_reboot}"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"${scenario_reboot}"
+chmod 0755 "${scenario_reboot}"
 capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
 [[ ${command_status} -eq 10 ]] \
-    || fail 'symlinked upstream 98 did not fail closed with rc=10'
-assert_stock_unchanged "${scenario_directory}/stock-target"
-[[ -L ${scenario_fixture} ]] \
-    || fail 'symlink validation failure replaced upstream 98'
+    || fail 'regular stock reboot path did not fail closed with rc=10'
+assert_stock_unchanged "${scenario_exit}"
+[[ -f ${scenario_reboot} && ! -L ${scenario_reboot} ]] \
+    || fail 'reboot-state validation changed the unexpected regular file'
+[[ $(<"${scenario_reboot}") == $'#!/bin/sh\nexit 1' ]] \
+    || fail 'reboot-state validation changed unexpected reboot bytes'
+assert_no_temporary "${scenario_directory}"
+
+prepare_scenario wrong-busybox-banner
+wrong_banner_reboot_target=${scenario_busybox}
+sed -i 's/BusyBox v1\.37\.0/BusyBox v1.36.0/' "${scenario_busybox}"
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${wrong_banner_reboot_target}"
+
+prepare_scenario unsupported-numeric-signal
+numeric_signal_reboot_target=${scenario_busybox}
+sed -i 's/"kill -l 39")/"kill -l 38")/' "${scenario_busybox}"
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${numeric_signal_reboot_target}"
+
+prepare_scenario wrong-pid1
+wrong_pid_reboot_target=${scenario_busybox}
+printf '%s\n' init >"${scenario_pid1}"
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${wrong_pid_reboot_target}"
 
 make_failure_shim() {
     local directory=$1
@@ -205,19 +373,83 @@ make_failure_shim() {
     chmod 0755 "${directory}/${command_name}"
 }
 
-for failing_command in mktemp chmod mv; do
+for failing_command in mktemp cp chmod mv; do
     prepare_scenario "failure-${failing_command}"
+    failure_reboot_target=${scenario_busybox}
     failure_shim_directory=${scenario_directory}/shim
     make_failure_shim "${failure_shim_directory}" "${failing_command}"
     capture_status env \
         PATH="${failure_shim_directory}:${PATH}" \
         LIVE_INSTALLER_MODE=1 \
         "${scenario_runner}"
-    [[ ${command_status} -eq 10 ]] \
-        || fail "${failing_command} failure did not preserve fail-closed rc=10"
-    assert_stock_unchanged "${scenario_fixture}"
-    assert_no_temporary "${scenario_directory}"
+    assert_failed_scenario_unchanged "${failure_reboot_target}"
 done
+
+prepare_scenario write-failure
+write_failure_reboot_target=${scenario_busybox}
+write_failure_directory=${scenario_directory}/unwritable-object
+mkdir "${write_failure_directory}"
+write_failure_shim=${scenario_directory}/shim
+mkdir "${write_failure_shim}"
+printf '%s\n' \
+    '#!/bin/sh' \
+    "printf '%s\\n' '${write_failure_directory}'" \
+    'exit 0' \
+    >"${write_failure_shim}/mktemp"
+chmod 0755 "${write_failure_shim}/mktemp"
+capture_status env \
+    PATH="${write_failure_shim}:${PATH}" \
+    LIVE_INSTALLER_MODE=1 \
+    "${scenario_runner}"
+[[ ${command_status} -eq 10 ]] \
+    || fail 'replacement write failure did not preserve fail-closed rc=10'
+assert_stock_unchanged "${scenario_exit}"
+assert_reboot_symlink_unchanged "${scenario_reboot}" "${write_failure_reboot_target}"
+
+prepare_scenario digest-mismatch
+digest_mismatch_reboot_target=${scenario_busybox}
+sed -i \
+    "s|^reviewed_reboot_wrapper_sha256=.*$|reviewed_reboot_wrapper_sha256=$(printf '0%.0s' {1..64})|" \
+    "${scenario_runner}"
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${digest_mismatch_reboot_target}"
+
+# Commit hook 98 on the first mv, fail the reboot-wrapper mv, then permit the
+# third mv to restore the verified stock backup. This exercises the only
+# partial-commit window without allowing teardown to continue.
+prepare_scenario rollback
+rollback_reboot_target=${scenario_busybox}
+rollback_shim=${scenario_directory}/shim
+rollback_counter=${scenario_directory}/mv-counter
+real_mv=$(command -v mv)
+mkdir "${rollback_shim}"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'count=0' \
+    'if [ -f "${EDBP_TEST_MV_COUNTER}" ]; then' \
+    '    IFS= read -r count <"${EDBP_TEST_MV_COUNTER}" || exit 1' \
+    'fi' \
+    'count=$((count + 1))' \
+    'printf "%s\\n" "${count}" >"${EDBP_TEST_MV_COUNTER}" || exit 1' \
+    'if [ "${count}" -eq 2 ]; then' \
+    '    exit 1' \
+    'fi' \
+    'exec "${EDBP_TEST_REAL_MV}" "$@"' \
+    >"${rollback_shim}/mv"
+chmod 0755 "${rollback_shim}/mv"
+capture_status env \
+    PATH="${rollback_shim}:${PATH}" \
+    EDBP_TEST_MV_COUNTER="${rollback_counter}" \
+    EDBP_TEST_REAL_MV="${real_mv}" \
+    LIVE_INSTALLER_MODE=1 \
+    "${scenario_runner}"
+[[ ${command_status} -eq 10 ]] \
+    || fail 'second commit failure did not preserve fail-closed rc=10'
+[[ $(<"${rollback_counter}") -eq 3 ]] \
+    || fail 'partial commit did not perform exactly one rollback rename'
+assert_stock_unchanged "${scenario_exit}"
+assert_reboot_symlink_unchanged "${scenario_reboot}" "${rollback_reboot_target}"
+assert_no_temporary "${scenario_directory}"
 
 make_stub() {
     local path=$1
@@ -261,7 +493,7 @@ prepare_model() {
     local name=$1
 
     model_directory=${test_directory}/${name}
-    mkdir "${model_directory}"
+    mkdir -p "${model_directory}/bin" "${model_directory}/sbin"
     model_20=${model_directory}/20final-message
     model_94=${model_directory}/94random-seed
     model_policy=${model_directory}/${policy##*/}
@@ -269,14 +501,23 @@ prepare_model() {
     model_97=${model_directory}/97release-dhcp-lease
     model_98=${model_directory}/98exit-installer
     model_99=${model_directory}/99reboot
+    model_busybox=${model_directory}/bin/busybox
+    model_reboot=${model_directory}/sbin/reboot
+    model_pid1=${model_directory}/proc-1-comm
     make_stub "${model_20}" 0
     make_stub "${model_94}" 0
     make_stub "${model_95}" 0
     make_stub "${model_97}" 0
     make_stub "${model_99}" 0
     write_reviewed_stock "${model_98}"
+    write_busybox_stub "${model_busybox}"
+    ln -s "${model_busybox}" "${model_reboot}"
+    printf '%s\n' systemd >"${model_pid1}"
     sed \
-        "s|^stock_exit_hook=.*$|stock_exit_hook=${model_98}|" \
+        -e "s|^stock_exit_hook=.*$|stock_exit_hook=${model_98}|" \
+        -e "s|^reboot_path=.*$|reboot_path=${model_reboot}|" \
+        -e "s|^busybox_path=.*$|busybox_path=${model_busybox}|" \
+        -e "s|^pid1_comm_path=.*$|pid1_comm_path=${model_pid1}|" \
         "${policy}" >"${model_policy}"
     chmod 0755 "${model_policy}"
     model_hooks=(
@@ -290,21 +531,47 @@ prepare_model() {
     )
 }
 
-# This models finish-install 2.124's reviewed return-code dispatch. The stubs
-# represent hook status only and are not presented as upstream binaries.
+# This models finish-install 2.124's reviewed return-code dispatch and rootskel
+# 1.138's reviewed rc=20 reboot selection. Hook stubs represent status/order;
+# they are not presented as copies of the upstream binaries.
 prepare_model model-live
 capture_status model_finish_install_rc_handling 1 "${model_hooks[@]}"
 [[ ${command_status} -eq 0 ]] \
     || fail 'modeled Live path did not continue through canonical 99reboot'
-[[ $(paste -sd, "${sequence_log}") == "${expected_order}" ]] \
+[[ $(paste -sd, "${sequence_log}") == "${expected_hook_order}" ]] \
     || fail 'modeled Live path did not reach every reviewed finish hook'
+printf '%s\n' rootskel-exit >>"${sequence_log}"
+model_safe_wrapper=${model_directory}/reviewed-wrapper-safe-test-copy
+model_kill_stub=${model_directory}/model-kill-stub
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\\n" "$*" >>"${EDBP_TEST_SEQUENCE_LOG}"' \
+    'exit 0' \
+    >"${model_kill_stub}"
+chmod 0755 "${model_kill_stub}"
+sed "s|/bin/busybox|${model_kill_stub}|" \
+    "${model_reboot}" >"${model_safe_wrapper}"
+chmod 0755 "${model_safe_wrapper}"
+capture_status env EDBP_TEST_SEQUENCE_LOG="${sequence_log}" "${model_safe_wrapper}"
+[[ ${command_status} -eq 0 ]] \
+    || fail 'modeled rootskel reboot wrapper did not reach its harmless kill stub'
+[[ $(tail -n 1 "${sequence_log}") == 'kill -39 1' ]] \
+    || fail 'modeled host reboot request did not use reviewed signal and PID'
+sed -i '$d' "${sequence_log}"
+printf '%s\n' reboot-wrapper host-systemd-normal-reboot-request >>"${sequence_log}"
+expected_final_sequence=${expected_hook_order},rootskel-exit,reboot-wrapper,host-systemd-normal-reboot-request
+[[ $(paste -sd, "${sequence_log}") == "${expected_final_sequence}" ]] \
+    || fail 'modeled Live lifecycle does not preserve teardown before host reboot'
 
 prepare_model model-nonlive
+model_nonlive_target=${model_busybox}
 capture_status model_finish_install_rc_handling __unset__ "${model_hooks[@]}"
 [[ ${command_status} -eq 0 ]] \
     || fail 'modeled non-Live path did not continue through canonical 99reboot'
-[[ $(paste -sd, "${sequence_log}") == "${expected_order}" ]] \
+[[ $(paste -sd, "${sequence_log}") == "${expected_hook_order}" ]] \
     || fail 'modeled non-Live path did not preserve normal hook continuation'
+assert_stock_unchanged "${model_98}"
+assert_reboot_symlink_unchanged "${model_reboot}" "${model_nonlive_target}"
 
 prepare_model model-failure
 printf '%s\n' '# altered' >>"${model_98}"
@@ -335,4 +602,4 @@ if grep -REn \
     fail 'temporary finish-install diagnostic text remains in production files'
 fi
 
-printf '%s\n' 'Finish-install normal reboot regression passed.'
+printf '%s\n' 'Finish-install systemd reboot compatibility regression passed.'
