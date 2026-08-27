@@ -64,4 +64,3 @@ d-i grub-installer/with_other_os boolean false
 
 ### Target finalization
 d-i preseed/late_command string /bin/sh /edbp-late-command
-d-i finish-install/reboot_in_progress note

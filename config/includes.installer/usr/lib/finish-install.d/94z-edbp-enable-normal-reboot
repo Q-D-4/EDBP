@@ -1,0 +1,81 @@
+#!/bin/sh
+
+# Debian live-installer 58 exits finish-install before 99reboot when the
+# launcher supplies LIVE_INSTALLER_MODE. EDBP deliberately uses Debian's
+# normal completion and reboot path, so neutralize only that reviewed hook.
+
+stock_exit_hook=/usr/lib/finish-install.d/98exit-installer
+reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
+reviewed_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
+temporary=
+
+# shellcheck disable=SC2317  # Invoked by the EXIT trap below.
+cleanup() {
+    if [ -n "${temporary}" ]; then
+        rm -f "${temporary}" >/dev/null 2>&1 || :
+    fi
+}
+
+fail_closed() {
+    printf 'ERROR: cannot enable the reviewed Debian finish-install path: %s\n' "$1" >&2
+    exit 10
+}
+
+# Non-Live Debian Installer runs must retain the upstream hook unchanged.
+if [ -z "${LIVE_INSTALLER_MODE:-}" ]; then
+    exit 0
+fi
+
+trap cleanup 0
+trap 'exit 10' 1 2 15
+
+if [ ! -f "${stock_exit_hook}" ] || [ -L "${stock_exit_hook}" ] \
+    || [ ! -x "${stock_exit_hook}" ]; then
+    fail_closed 'live-installer 98exit-installer is not an executable regular file'
+fi
+
+if ! stock_listing=$(LC_ALL=C ls -ld "${stock_exit_hook}" 2>/dev/null); then
+    fail_closed 'live-installer 98exit-installer mode cannot be read'
+fi
+if [ "${stock_listing%% *}" != '-rwxr-xr-x' ]; then
+    fail_closed 'live-installer 98exit-installer mode is not 0755'
+fi
+
+if ! stock_digest=$(sha256sum "${stock_exit_hook}" 2>/dev/null); then
+    fail_closed 'live-installer 98exit-installer digest cannot be read'
+fi
+if [ "${stock_digest%% *}" != "${reviewed_stock_sha256}" ]; then
+    fail_closed 'live-installer 98exit-installer differs from version 58'
+fi
+
+temporary=$(mktemp "${stock_exit_hook}.edbp.XXXXXX") \
+    || fail_closed 'temporary replacement cannot be created'
+if ! printf '%s\n' \
+    '#!/bin/sh -e' \
+    '' \
+    '# EDBP preserves LIVE_INSTALLER_MODE but selects the normal 99reboot path.' \
+    'exit 0' >"${temporary}"; then
+    fail_closed 'temporary replacement cannot be written'
+fi
+chmod 0755 "${temporary}" \
+    || fail_closed 'temporary replacement mode cannot be set'
+
+if ! replacement_listing=$(LC_ALL=C ls -ld "${temporary}" 2>/dev/null); then
+    fail_closed 'temporary replacement mode cannot be read'
+fi
+if [ "${replacement_listing%% *}" != '-rwxr-xr-x' ]; then
+    fail_closed 'temporary replacement mode is not 0755'
+fi
+
+if ! replacement_digest=$(sha256sum "${temporary}" 2>/dev/null); then
+    fail_closed 'temporary replacement digest cannot be read'
+fi
+if [ "${replacement_digest%% *}" != "${reviewed_replacement_sha256}" ]; then
+    fail_closed 'temporary replacement content differs from the reviewed policy'
+fi
+
+mv -f "${temporary}" "${stock_exit_hook}" \
+    || fail_closed 'reviewed replacement cannot be installed atomically'
+temporary=
+
+exit 0

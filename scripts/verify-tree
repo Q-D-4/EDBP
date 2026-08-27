@@ -56,10 +56,10 @@ sh -n config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-histor
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
-sh -n config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
+sh -n config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
 bash -n tests/test-bash-session-history-policy
-bash -n tests/test-finish-install-handoff
+bash -n tests/test-finish-install-reboot
 bash -n tests/test-in-target-stdout-policy
 bash -n tests/test-oobe-hostname-policy
 bash -n tests/test-oobe-username-policy
@@ -71,7 +71,7 @@ bash -n tests/test-plasma-wallpaper-default
 for installer_script in \
     config/includes.installer/edbp-late-command \
     config/includes.installer/edbp-partman-policy \
-    config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit \
+    config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy; do
     [[ -x "${installer_script}" ]] \
         || fail "installer script is not executable: ${installer_script}"
@@ -96,7 +96,7 @@ shellcheck -x --severity=style \
     auto/config \
     config/hooks/live/*.hook.chroot \
     config/includes.installer/edbp-late-command \
-    config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit \
+    config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot \
     config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
     config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh \
     config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
@@ -104,7 +104,7 @@ shellcheck -x --severity=style \
     scripts/stage-localadmin-password \
     scripts/verify-tree \
     tests/test-bash-session-history-policy \
-    tests/test-finish-install-handoff \
+    tests/test-finish-install-reboot \
     tests/test-in-target-stdout-policy \
     tests/test-oobe-hostname-policy \
     tests/test-oobe-username-policy \
@@ -311,7 +311,7 @@ fi
 ./tests/test-offline-uefi-bootloader-policy
 ./tests/test-plasma-wallpaper-default
 ./tests/test-plasma-launcher-default
-./tests/test-finish-install-handoff
+./tests/test-finish-install-reboot
 grep -Fq 'TYPE=linux_raid_member' \
     config/includes.installer/edbp-partman-policy \
     || fail 'installer storage policy does not reject existing MD metadata'
@@ -371,29 +371,46 @@ if grep -REn \
     fail 'Bash history policy disables memory or uses a filesystem workaround'
 fi
 
-finish_handoff_installer=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
-[[ ${finish_handoff_installer##*/} == 96edbp-live-installer-exit ]] \
-    || fail 'Live-installer handoff is not placed at the reviewed post-95 boundary'
-grep -Fqx 'if [ -n "${LIVE_INSTALLER_MODE:-}" ]; then' \
-    "${finish_handoff_installer}" \
-    || fail 'finish-install handoff is not limited to nested Live-installer mode'
-grep -Fqx '    exit 11' "${finish_handoff_installer}" \
-    || fail 'finish-install handoff does not preserve canonical rc=11'
-grep -Fqx 'exit 0' "${finish_handoff_installer}" \
-    || fail 'finish-install handoff changes non-live installer behavior'
+finish_reboot_policy=config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot
+obsolete_finish_handoff=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
+[[ ${finish_reboot_policy##*/} == 94z-edbp-enable-normal-reboot ]] \
+    || fail 'normal reboot policy is not placed after upstream 94random-seed'
+[[ ! -e ${obsolete_finish_handoff} && ! -L ${obsolete_finish_handoff} ]] \
+    || fail 'obsolete rc=11 Live handoff remains in production'
+grep -Fqx 'if [ -z "${LIVE_INSTALLER_MODE:-}" ]; then' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy is not limited to nested Live-installer mode'
+grep -Fqx \
+    'reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin live-installer 58 hook 98'
+grep -Fqx '    exit 10' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not fail closed before teardown'
 finish_hook_order=$(printf '%s\n' \
+    20final-message \
+    94random-seed \
+    "${finish_reboot_policy##*/}" \
     95umount \
-    "${finish_handoff_installer##*/}" \
     97release-dhcp-lease \
     98exit-installer \
     99reboot | LC_ALL=C sort | paste -sd, -)
 [[ ${finish_hook_order} == \
-    95umount,96edbp-live-installer-exit,97release-dhcp-lease,98exit-installer,99reboot ]] \
-    || fail 'finish-install handoff does not have the reviewed execution order'
-if grep -En \
-    '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|reboot|poweroff|halt|shutdown)([[:space:]]|$)' \
-    "${finish_handoff_installer}" >/dev/null; then
-    fail 'finish-install handoff performs work beyond canonical Live exit'
+    20final-message,94random-seed,94z-edbp-enable-normal-reboot,95umount,97release-dhcp-lease,98exit-installer,99reboot ]] \
+    || fail 'normal completion and reboot hooks do not have the reviewed order'
+if awk '$1 == "d-i" && $2 == "finish-install/reboot_in_progress" { found = 1 } END { exit !found }' \
+    "${preseed_template}"; then
+    fail 'preseed suppresses Debian final completion note'
+fi
+if grep -REn \
+    '(^|[[:space:];])(exit|return)[[:space:]]+11([[:space:];]|$)' \
+    config/includes.installer/usr/lib/finish-install.d >/dev/null; then
+    fail 'a production finish-install hook requests obsolete rc=11 Live exit'
+fi
+if grep -Ev '^[[:space:]]*#' "${finish_reboot_policy}" \
+    | grep -En \
+        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(stat|mountpoint|apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|reboot|poweroff|halt|shutdown|systemctl)([[:space:]]|$)' \
+        >/dev/null; then
+    fail 'normal reboot policy performs unrelated target, mount, package, network, or reboot work'
 fi
 
 grep -Fqx \
