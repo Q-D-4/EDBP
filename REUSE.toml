@@ -1,0 +1,84 @@
+version = 1
+
+[[annotations]]
+path = "**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Osama Haddad (Q-D-4)"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = [
+  "README.md",
+  "EDBP-v2.2.0-SPECIFICATION.md",
+  "LICENSING.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  "THIRD_PARTY_NOTICES.md",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Osama Haddad (Q-D-4)"
+SPDX-License-Identifier = "CC-BY-SA-4.0"
+
+[[annotations]]
+path = "DCO"
+precedence = "override"
+SPDX-FileCopyrightText = "2004, 2006 The Linux Foundation and its contributors"
+SPDX-License-Identifier = "LicenseRef-DCO-1.1-Text"
+
+[[annotations]]
+path = [
+  "config/includes.chroot_after_packages/etc/usbguard/usbguard-daemon.conf",
+  "config/includes.chroot_after_packages/etc/usbguard/IPCAccessControl.d/:sudo",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+  "2015-2019 Red Hat, Inc.",
+  "2026 Osama Haddad (Q-D-4)",
+]
+SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = "tests/test-bash-session-history-policy"
+precedence = "override"
+SPDX-FileCopyrightText = [
+  "2026 Osama Haddad (Q-D-4)",
+  "1995-2011 Software in the Public Interest",
+  "1987-2022 Free Software Foundation, Inc.",
+]
+SPDX-License-Identifier = "GPL-3.0-or-later"
+SPDX-FileComment = "Contains short Debian base-files and GNU Bash compatibility fixtures; see THIRD_PARTY_NOTICES.md."
+
+[[annotations]]
+path = "tests/test-finish-install-reboot"
+precedence = "override"
+SPDX-FileCopyrightText = [
+  "2026 Osama Haddad (Q-D-4)",
+  "2007-2010 Otavio Salvador <otavio@ossystems.com.br>",
+  "2007-2012 Daniel Baumann <daniel@debian.org>",
+]
+SPDX-License-Identifier = "GPL-3.0-or-later"
+SPDX-FileComment = "Contains a short Debian live-installer 58 compatibility fixture; see THIRD_PARTY_NOTICES.md."
+
+[[annotations]]
+path = "config/includes.chroot_after_packages/etc/nftables.conf"
+precedence = "override"
+SPDX-FileCopyrightText = "NONE"
+SPDX-License-Identifier = "LicenseRef-EDBP-Organization-Provided"
+SPDX-FileComment = "Supplied by the deploying organization's cybersecurity team; EDBP makes no assertion of copyright ownership."
+
+[[annotations]]
+path = "config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/**"
+precedence = "override"
+SPDX-FileCopyrightText = "The organization that deploys EDBP"
+SPDX-License-Identifier = "LicenseRef-EDBP-Organization-Proprietary"
+
+[[annotations]]
+path = [
+  "config/archives/brave-browser.key",
+  "config/archives/element-io.key",
+  "config/includes.chroot_after_packages/usr/share/keyrings/brave-browser-archive-keyring.gpg",
+  "config/includes.chroot_after_packages/usr/share/keyrings/element-io-archive-keyring.gpg",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "NONE"
+SPDX-License-Identifier = "LicenseRef-ThirdParty-Public-Key"

@@ -1,0 +1,5 @@
+Third-Party Public Cryptographic Key Material Notice
+
+EDBP makes no copyright claim over the cryptographic public key material covered by this notice. The material is reproduced solely to authenticate packages or repository metadata from the identified third-party vendor.
+
+Any rights that may subsist in the material remain with the applicable vendor or other rights holder. Inclusion in EDBP does not place the material under the EDBP GPL or documentation license and does not grant rights beyond those available from the rights holder or applicable law.

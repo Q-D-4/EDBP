@@ -1,0 +1,7 @@
+EDBP Organization-Owned Proprietary Material Notice
+
+The material covered by this notice is owned by the organization that deploys EDBP and is not licensed under the EDBP open-source software or documentation licenses.
+
+The rights holder has authorized publication and redistribution of the covered material as part of the EDBP source repository and EDBP-built installation media. No broader open-source license is granted by EDBP for this material.
+
+Any use, modification, or redistribution outside that authorization requires permission from the applicable rights holder unless otherwise permitted by law.

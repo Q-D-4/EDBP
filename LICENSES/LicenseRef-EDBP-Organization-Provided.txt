@@ -1,0 +1,7 @@
+EDBP Organization-Provided Material Notice
+
+The material covered by this notice was supplied by the organization that deploys EDBP. Osama Haddad (Q-D-4) does not claim original copyright in it, and this notice does not assert who owns any copyright that may subsist in it.
+
+The organization has approved publication and redistribution of the material as part of the EDBP source repository and EDBP-built installation media. The material is not covered by the EDBP GPL or documentation license, and EDBP grants no broader rights.
+
+Any additional use, modification, or redistribution requires permission from the applicable rights holder unless otherwise permitted by law.
