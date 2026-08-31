@@ -42,8 +42,8 @@ path = "tests/test-bash-session-history-policy"
 precedence = "override"
 SPDX-FileCopyrightText = [
   "2026 Osama Haddad (Q-D-4)",
-  "Debian base-files contributors",
-  "Free Software Foundation, Inc.",
+  "1995-2011 Software in the Public Interest",
+  "1987-2022 Free Software Foundation, Inc.",
 ]
 SPDX-License-Identifier = "GPL-3.0-or-later"
 SPDX-FileComment = "Contains short Debian base-files and GNU Bash compatibility fixtures; see THIRD_PARTY_NOTICES.md."
@@ -53,7 +53,8 @@ path = "tests/test-finish-install-reboot"
 precedence = "override"
 SPDX-FileCopyrightText = [
   "2026 Osama Haddad (Q-D-4)",
-  "Debian live-installer contributors",
+  "2007-2010 Otavio Salvador <otavio@ossystems.com.br>",
+  "2007-2012 Daniel Baumann <daniel@debian.org>",
 ]
 SPDX-License-Identifier = "GPL-3.0-or-later"
 SPDX-FileComment = "Contains a short Debian live-installer 58 compatibility fixture; see THIRD_PARTY_NOTICES.md."
@@ -61,8 +62,9 @@ SPDX-FileComment = "Contains a short Debian live-installer 58 compatibility fixt
 [[annotations]]
 path = "config/includes.chroot_after_packages/etc/nftables.conf"
 precedence = "override"
-SPDX-FileCopyrightText = "The organization that deploys EDBP"
-SPDX-License-Identifier = "LicenseRef-EDBP-Organization-Proprietary"
+SPDX-FileCopyrightText = "NONE"
+SPDX-License-Identifier = "LicenseRef-EDBP-Organization-Provided"
+SPDX-FileComment = "Supplied by the deploying organization's cybersecurity team; EDBP makes no assertion of copyright ownership."
 
 [[annotations]]
 path = "config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/**"
