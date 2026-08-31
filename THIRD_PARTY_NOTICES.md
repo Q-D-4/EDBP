@@ -14,6 +14,7 @@ This file is adapted from the USBGuard 1.1.3 daemon configuration template.
 - Reviewed upstream version: 1.1.3
 - Upstream source: https://github.com/USBGuard/usbguard/blob/usbguard-1.1.3/usbguard-daemon.conf.in
 - Debian copyright information: https://sources.debian.org/src/usbguard/1.1.3%2Bds-3/debian/copyright/
+- Copyright: 2015-2019 Red Hat, Inc.
 - Applicable upstream license: `GPL-2.0-or-later`
 
 EDBP-specific changes and comments do not remove the upstream attribution or license applicable to the adapted material.
@@ -25,6 +26,7 @@ This file contains the three-line USBGuard ACL example used for a restricted IPC
 - Upstream project: USBGuard
 - Reviewed upstream version: 1.1.3
 - Upstream documentation: https://github.com/USBGuard/usbguard/blob/usbguard-1.1.3/doc/man/usbguard-daemon.conf.5.adoc
+- Copyright: 2015-2019 Red Hat, Inc.
 - Applicable upstream license: `GPL-2.0-or-later`
 
 The exact ACL fragment is highly functional and may be below the copyright threshold in some jurisdictions; EDBP nevertheless preserves upstream attribution and treats it conservatively as upstream-derived.
@@ -37,6 +39,8 @@ The test harness is EDBP-authored, but its fixture reproduces short portions of 
 
 - Debian base-files source: https://sources.debian.org/src/base-files/13.8%2Bdeb13u6/share/profile/
 - GNU Bash Debian configuration: https://sources.debian.org/src/bash/5.2.37-2/debian/etc.bash.bashrc/
+- Copyright: 1995-2011 Software in the Public Interest
+- Copyright: 1987-2022 Free Software Foundation, Inc.
 - base-files license: `GPL-2.0-or-later`
 - Bash packaging/license applicable to the reproduced fixture: `GPL-3.0-or-later`
 
@@ -52,9 +56,23 @@ The EDBP test harness contains a verbatim fixture of Debian live-installer 58's 
 - Reviewed upstream version: 58
 - Upstream file: https://sources.debian.org/src/live-installer/58/finish-install.d/98exit-installer/
 - Debian copyright information: https://sources.debian.org/src/live-installer/58/debian/copyright/
+- Copyright: 2007-2010 Otavio Salvador <otavio@ossystems.com.br>
+- Copyright: 2007-2012 Daniel Baumann <daniel@debian.org>
 - Applicable upstream license: `GPL-2.0-or-later`
 
 The combined EDBP test file may be distributed under `GPL-3.0-or-later`; the embedded upstream fixture retains its provenance and applicable upstream rights.
+
+## Developer Certificate of Origin
+
+### `DCO`
+
+This file contains the unmodified Developer Certificate of Origin 1.1 text.
+
+- Authoritative source: https://developercertificate.org/
+- Copyright: 2004, 2006 The Linux Foundation and its contributors.
+- Applicable notice: `LicenseRef-DCO-1.1-Text`
+
+The document may be copied and distributed verbatim, but may not be changed. It is a contribution-provenance certification; it does not assign contributor copyright or license EDBP source code.
 
 ## Organization-provided security policy
 
@@ -62,7 +80,7 @@ The combined EDBP test file may be distributed under `GPL-3.0-or-later`; the emb
 
 This firewall policy was supplied by the cybersecurity team of the organization that deploys EDBP. It is not claimed as original copyright of Osama Haddad (Q-D-4) and is **not covered by the default EDBP GPL grant**.
 
-The organization is aware of and has authorized its publication/distribution as part of EDBP. No separate public open-source license has been granted for this file by this repository.
+The organization has approved its publication/distribution as part of EDBP. This statement does not assert that the organization owns every copyright interest or grants rights it does not hold. No separate public open-source license has been granted by EDBP for this file.
 
 ## Organization-owned wallpaper
 
