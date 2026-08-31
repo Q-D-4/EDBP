@@ -1,0 +1,20 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: EDBP
+Source: https://github.com/Q-D-4/EDBP
+
+Files: README.md
+       EDBP-v2.2.0-SPECIFICATION.md
+Copyright: 2026 Osama Haddad (Q-D-4)
+License: CC-BY-SA-4.0
+
+Files: tests/test-bash-session-history-policy
+Copyright: 2026 Osama Haddad (Q-D-4)
+License: GPL-3.0-or-later
+Comment: The EDBP-authored test harness contains short upstream-derived fixtures.
+         See THIRD_PARTY_NOTICES.md for Debian base-files and GNU Bash provenance.
+
+Files: tests/test-finish-install-reboot
+Copyright: 2026 Osama Haddad (Q-D-4)
+License: GPL-3.0-or-later
+Comment: The EDBP-authored test harness contains a short Debian live-installer fixture.
+         See THIRD_PARTY_NOTICES.md for upstream provenance and licensing.
