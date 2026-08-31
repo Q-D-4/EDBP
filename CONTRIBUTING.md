@@ -6,7 +6,7 @@ EDBP accepts contributions under the licensing and provenance rules described in
 
 Unless a file states otherwise, contributions to EDBP-original software and copyrightable configuration are submitted under `GPL-3.0-or-later`.
 
-A contribution to a file with a different or upstream-derived license must remain compatible with, and preserve, that file's existing license and attribution. See `LICENSES/README.md` and `THIRD_PARTY_NOTICES.md` before modifying such files.
+A contribution to a file with a different or upstream-derived license must remain compatible with, and preserve, that file's existing license and attribution. See `LICENSING.md` and `THIRD_PARTY_NOTICES.md` before modifying such files.
 
 Do not remove or weaken SPDX identifiers, copyright notices, provenance comments, or third-party attribution without an explicit licensing review.
 
