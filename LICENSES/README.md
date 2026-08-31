@@ -22,6 +22,15 @@ The following files contain upstream-derived material and retain the upstream at
 - `tests/test-bash-session-history-policy`
 - `tests/test-finish-install-reboot`
 
-Documentation (`README.md` and `EDBP-v2.2.0-SPECIFICATION.md`) is not placed under the default software grant by this file. Its documentation license is declared separately when present.
+## Documentation
+
+The following EDBP-original documentation is licensed separately under the Creative Commons Attribution-ShareAlike 4.0 International license (`CC-BY-SA-4.0`):
+
+- `README.md`
+- `EDBP-v2.2.0-SPECIFICATION.md`
+
+Copyright © 2026 Osama Haddad (Q-D-4). The complete documentation license text is provided at `LICENSES/CC-BY-SA-4.0.txt`.
+
+The documentation license does not change the licenses of code snippets, third-party material, vendor names, trademarks, or separately licensed files quoted or referenced by the documentation.
 
 Where an SPDX identifier and this scope statement differ, the more specific per-file notice controls for that file.
