@@ -1,0 +1,58 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+umask 077
+
+if (( $# != 2 )); then
+    printf 'Usage: %s SOURCE_AUTHORIZED_KEYS STAGED_PATH\n' "$0" >&2
+    exit 2
+fi
+
+source_file=$1
+staged_file=$2
+
+[[ -f "${source_file}" && ! -L "${source_file}" ]] \
+    || { printf 'ERROR: admin key source must be a regular non-symlink file: %s\n' "${source_file}" >&2; exit 1; }
+
+mkdir -p -- "$(dirname -- "${staged_file}")"
+temporary=$(mktemp "${staged_file}.tmp.XXXXXX")
+trap 'rm -f -- "${temporary}"' EXIT
+
+awk '
+    NF == 0 || $1 ~ /^#/ { next }
+    { print }
+' "${source_file}" >"${temporary}"
+
+[[ -s "${temporary}" ]] \
+    || { printf '%s\n' 'ERROR: no SSH public keys were supplied' >&2; exit 1; }
+
+key_count=0
+while IFS= read -r key_line; do
+    key_type=${key_line%% *}
+    case "${key_type}" in
+        ssh-ed25519|sk-ssh-ed25519@openssh.com)
+            ;;
+        *)
+            printf 'ERROR: unsupported admin key type: %s (ED25519 required)\n' \
+                "${key_type}" >&2
+            exit 1
+            ;;
+    esac
+
+    key_probe=$(mktemp)
+    printf '%s\n' "${key_line}" >"${key_probe}"
+    ssh-keygen -l -f "${key_probe}" >/dev/null \
+        || { rm -f -- "${key_probe}"; printf '%s\n' 'ERROR: malformed SSH public key' >&2; exit 1; }
+    rm -f -- "${key_probe}"
+
+    (( key_count += 1 ))
+done <"${temporary}"
+
+(( key_count <= 20 )) \
+    || { printf '%s\n' 'ERROR: at most 20 administrative keys are allowed' >&2; exit 1; }
+
+chmod 0600 "${temporary}"
+mv -f -- "${temporary}" "${staged_file}"
+trap - EXIT
+
+printf 'Staged %d validated administrative SSH key(s).\n' "${key_count}"

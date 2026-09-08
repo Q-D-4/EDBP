@@ -1,0 +1,9 @@
+{
+  "KPlugin": {
+    "Id": "EDBP",
+    "Name": "EDBP",
+    "Description": "EDBP project desktop background",
+    "License": "CC-BY-SA-4.0"
+  },
+  "X-KDE-PlasmaImageWallpaper-AccentColor": "#00695f"
+}

@@ -1,0 +1,5 @@
+# TTY first-boot UI, account-management commands, and build-time policy checks.
+whiptail
+passwd
+python3-minimal
+kbd

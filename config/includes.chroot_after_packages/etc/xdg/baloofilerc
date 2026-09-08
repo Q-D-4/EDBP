@@ -1,0 +1,5 @@
+# Disable per-user content indexing on the 4 GiB fleet baseline. Filename
+# browsing remains available; this prevents Baloo database I/O and metadata
+# retention on sensitive workstations.
+[Basic Settings]
+Indexing-Enabled[$i]=false

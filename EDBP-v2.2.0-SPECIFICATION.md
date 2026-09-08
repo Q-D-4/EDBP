@@ -1,0 +1,1200 @@
+# EDBP v2.2.0 — Enterprise Debian Build Platform Specification
+
+**Document class:** Normative architecture, build, security, and acceptance specification
+
+**Target:** Debian 13 (Trixie), amd64, UEFI-only enterprise workstations
+
+**Build framework:** Debian `live-build`
+
+**Image model:** Hybrid Live ISO + graphical Debian Installer
+
+**Desktop:** Minimal KDE Plasma 6 with SDDM
+
+**Version source:** `VERSION`
+**Specification status:** Code-complete release candidate; Golden Master status
+requires every release gate in this document to pass.
+
+---
+
+## 1. Normative language and engineering status
+
+The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
+
+This repository is the executable source for an EDBP image, but the presence of
+configuration files is not evidence that an ISO is production-safe. A build is
+a **Golden Master** only after:
+
+1. the source tree is committed and clean;
+2. `make verify` and `make all` pass;
+3. the generated checksums and manifest are retained;
+4. two independent UEFI installations pass the VM and forensic tests;
+5. the deployment security reviewer accepts the generic firewall baseline or
+   an explicitly reviewed site override;
+6. the actual printer, scanner, hub, dock, and USB VID/PID inventory passes a
+   hardware pilot;
+7. the shared-password exception has an owner, vault record, expiry date,
+   rotation/recovery procedure, and tested replacement path.
+
+No plaintext administrator password, password hash, SSH private key, or API
+token may be committed. As a time-bounded deployment exception, the build
+controller reads a shared `edbpadmin` crypt(3) hash from an ignored mode-0600
+file and renders it into the installer preseed. The hash is consequently
+embedded in the installer initrd and is extractable for offline attack; it is
+not equivalent to a secret-management system. Only reviewed ED25519 public
+keys and the explicitly supplied password hash are injected at build time.
+
+### 1.1 Deliberate path corrections
+
+- LibreOffice administrator policy is
+  `/etc/libreoffice/registry/edbp-defaults.xcd`. An `.xcu` file is a user-layer
+  registry fragment and is not the correct system-wide extension format.
+- OOBE is `/usr/local/sbin/edbp-oobe`. It is a root-only system
+  administration program and therefore does not belong in `/usr/local/bin`.
+- The OOBE service disables normal enablement after success but does not delete
+  its packaged unit. `/var/lib/edbp/oobe-complete` is the authoritative,
+  atomic completion guard.
+
+---
+
+## 2. Scope and deployment assumptions
+
+| Property | Normative value |
+|---|---|
+| Deployment size | Defined by the deploying organization |
+| CPU | Intel/AMD x86-64 supported by Debian 13 |
+| Memory | 4 GiB minimum |
+| Storage | NVMe, SATA SSD, or HDD |
+| Firmware | UEFI only; legacy BIOS intentionally unsupported |
+| Secure Boot | `auto`; signed Debian shim/GRUB used when available |
+| Default network profile | Controlled private-network firewall; new public-network traffic dropped |
+| Site network policy | Supplied as an explicit downstream override when required |
+| Update source | Debian/vendor HTTPS repositories or future internal mirror |
+| Installed administrator | `edbpadmin`, build-injected shared console/sudo password, SSH key-only |
+| Daily user | Created by OOBE; no sudo; `scanner` is the sole supplementary group |
+| UI language | English |
+| LibreOffice UI | Arabic, Tabbed Notebookbar |
+| Keyboard | `us,ara`, both Alt+Shift combinations through XKB group option |
+
+Full-disk encryption is not silently enabled or rejected by this repository.
+The installer leaves partitioning interactive. Fleet governance MUST decide
+whether LUKS is mandatory before Golden Master approval.
+
+---
+
+## 3. Layered architecture
+
+### Layer 01 — Boot, kernel, initramfs
+
+- amd64 only;
+- `iso-hybrid` image with `grub-efi` only;
+- Debian Live initramfs through `live-boot`;
+- graphical Debian Installer included with `--debian-installer live`;
+- Secure Boot support selected automatically;
+- Bluetooth kernel modules denied by boot arguments, modprobe blacklist, and
+  explicit `install /bin/false` rules;
+- USB storage kernel modules are **not** blacklisted because USBGuard must be
+  able to grant a root-authorized runtime exception.
+
+### Layer 02 — Packages, repositories, daemons, security policy
+
+- explicit package lists with APT Recommends disabled;
+- scoped Brave and Element keyrings, runtime sources, and package pinning;
+- generic nftables private-network default-deny baseline enabled by default;
+- USBGuard class policy and `sudo` group IPC delegation;
+- minimal Plasma, broad printer/scanner support, LibreOffice, Brave, Element,
+  KeePassXC Minimal, and Simple Scan.
+
+### Layer 03 — Desktop, identity, managed application policy, OOBE
+
+- SDDM hides `edbpadmin` from the chooser;
+- password-required sudo policy;
+- managed Brave and LibreOffice defaults;
+- immutable KDE keyboard and locale defaults;
+- transactional first-boot hostname and daily-user provisioning.
+
+### Layer 04 — Installer, SSH enrollment, final hooks, automation
+
+- partial initrd preseed that never selects or confirms a disk;
+- build-time `edbpadmin` password-hash injection with no password prompt;
+- build-time ED25519 public-key injection;
+- per-install SSH host-key generation;
+- SSH public-key-only hardening;
+- service validation, cache cleanup, checksum and provenance generation.
+
+---
+
+## 4. Complete repository tree
+
+Generated `live-build` state, build directories, ISO artifacts, checksums,
+local secret inputs, and staged installer inputs are intentionally ignored.
+
+```text
+EDBP/
+├── .gitignore
+├── EDBP-v2.2.0-SPECIFICATION.md
+├── Makefile
+├── README.md
+├── VERSION
+├── auto/
+│   └── config
+├── config/
+│   ├── archives/
+│   │   ├── 00-edbp-trust-scope.conf
+│   │   ├── brave-browser-release.list.binary
+│   │   ├── brave-browser.key
+│   │   ├── brave-browser.list.chroot
+│   │   ├── brave-browser.pref
+│   │   ├── element-io.key
+│   │   ├── element-io.list.binary
+│   │   ├── element-io.list.chroot
+│   │   └── element-io.pref
+│   ├── hooks/
+│   │   └── live/
+│   │       ├── 010-harden-usbguard-package-defaults.hook.chroot
+│   │       ├── 020-remove-brave-global-trust.hook.chroot
+│   │       ├── 030-enable-firewall-baseline.hook.chroot
+│   │       ├── 040-configure-desktop-identity.hook.chroot
+│   │       ├── 050-validate-security-assets.hook.chroot
+│   │       ├── 060-configure-network-services.hook.chroot
+│   │       └── 090-clean-image.hook.chroot
+│   ├── includes.installer/
+│   │   ├── edbp-late-command
+│   │   ├── edbp-partman-policy
+│   │   ├── preseed.cfg.in
+│   │   └── usr/lib/apt-setup/generators/40cdrom
+│   ├── includes.chroot_after_packages/
+│   │   ├── etc/
+│   │   │   ├── apt/sources.list.d/debian.sources
+│   │   │   ├── brave-origin/policies/managed/policies.json
+│   │   │   ├── default/keyboard
+│   │   │   ├── libreoffice/registry/edbp-defaults.xcd
+│   │   │   ├── locale.conf
+│   │   │   ├── locale.gen
+│   │   │   ├── modprobe.d/90-edbp-disable-bluetooth.conf
+│   │   │   ├── nftables.conf
+│   │   │   ├── sddm.conf.d/hide-admin.conf
+│   │   │   ├── ssh/sshd_config.d/10-edbp-hardening.conf
+│   │   │   ├── sudoers.d/edbpadmin
+│   │   │   ├── systemd/system/
+│   │   │   │   ├── edbp-oobe.service
+│   │   │   │   ├── sddm.service.d/10-edbp-oobe.conf
+│   │   │   │   ├── usbguard-dbus.service.d/10-edbp-deny-activation.conf
+│   │   │   │   └── usbguard.service.d/10-skip-live-session.conf
+│   │   │   ├── usbguard/
+│   │   │   │   ├── IPCAccessControl.d/:sudo
+│   │   │   │   ├── rules.conf
+│   │   │   │   └── usbguard-daemon.conf
+│   │   │   └── xdg/
+│   │   │       ├── baloofilerc
+│   │   │       ├── kxkbrc
+│   │   │       ├── mimeapps.list
+│   │   │       ├── plasmarc
+│   │   │       └── plasma-localerc
+│   │   └── usr/
+│   │       ├── local/sbin/edbp-oobe
+│   │       └── share/
+│   │           ├── keyrings/
+│   │           │   ├── brave-browser-archive-keyring.gpg
+│   │           │   └── element-io-archive-keyring.gpg
+│   │           └── wallpapers/EDBP/
+│   │               ├── metadata.json
+│   │               └── contents/images/1920x1080.jpg
+│   └── package-lists/
+│       ├── applications.list.chroot
+│       ├── desktop.list.chroot
+│       ├── hardware-printers.list.chroot
+│       ├── identity-oobe.list.chroot
+│       ├── installer-launcher.list.chroot_live
+│       ├── live-runtime.list.chroot
+│       ├── productivity.list.chroot
+│       └── security-core.list.chroot
+└── scripts/
+    ├── stage-admin-keys
+    ├── stage-edbpadmin-password
+    └── verify-tree
+```
+
+The local source inputs and generated installer files below MUST NOT be
+tracked:
+
+```text
+secrets/edbpadmin_authorized_keys
+secrets/edbpadmin_password_hash
+config/includes.installer/edbpadmin_authorized_keys
+config/includes.installer/preseed.cfg
+edbp-2.2.0-amd64.build-inputs.json
+```
+
+---
+
+## 5. Build-controller contract
+
+`auto/config` resolves the repository root independently of the caller's
+current directory and validates `VERSION`. Its critical values are:
+
+| live-build option | Value | Reason |
+|---|---|---|
+| `--distribution` | `trixie` | Debian 13 |
+| `--architecture` | `amd64` | Public baseline |
+| `--binary-image` | `iso-hybrid` | Optical/USB boot artifact |
+| `--bootloaders` | `grub-efi` | UEFI-only boot path |
+| `--uefi-secure-boot` | `auto` | Use signed chain when available |
+| `--debian-installer` | `live` | Install the reviewed Live filesystem |
+| `--debian-installer-gui` | `true` | Graphical installer |
+| `--archive-areas` | `main non-free-firmware` | Base plus firmware |
+| `--apt-recommends` | `false` | Deterministic minimal package closure |
+| `--checksums` | `sha256` | Media integrity metadata; D-I also adds MD5 as required |
+| SquashFS compression | `xz` | Minimum image size, slower build/boot decompression |
+
+`config/includes.installer/preseed.cfg.in` is the tracked, secret-free source.
+The build controller renders `config/includes.installer/preseed.cfg`, which is
+copied to the root of both installer initrds. Debian Installer automatically
+loads a root-level `preseed.cfg`; a `preseed/file=/cdrom/...` argument is
+therefore neither needed nor correct for this layout.
+
+Build and runtime Debian mirror URLs are overridable using:
+
+```text
+EDBP_BUILD_MIRROR
+EDBP_BUILD_SECURITY_MIRROR
+EDBP_RUNTIME_MIRROR
+EDBP_RUNTIME_SECURITY_MIRROR
+EDBP_ISO_PUBLISHER
+```
+
+This supports a future local APT mirror without changing tracked source.
+
+---
+
+## 6. Repository and APT trust model
+
+### 6.1 Source ownership
+
+| Repository | Build source | Installed source | Eligible packages |
+|---|---|---|---|
+| Debian | `auto/config` mirrors | `etc/apt/sources.list.d/debian.sources` | Debian archive packages |
+| Brave | `brave-browser.list.chroot` | `brave-browser-release.list.binary` | `brave-origin`, `brave-keyring` |
+| Element | `element-io.list.chroot` | `element-io.list.binary` | `element-desktop`, `element-io-archive-keyring` |
+
+Every vendor source uses `Signed-By`. `live-build` uses two distinct archive
+passes and can temporarily expose the chroot and binary source entries in the
+same APT invocation. Each repository therefore has one unsuffixed `*.key`
+input shared by both passes, and both source entries reference the same
+generated path under `trusted.gpg.d`. Stage-suffixed duplicate keys are
+forbidden because they produce different `Signed-By` values for the same
+URI/suite and APT rejects the source set as ambiguous.
+
+`00-edbp-trust-scope.conf` excludes `trusted.gpg.d` from global trust: only
+Debian's archive keyring and administrator keyrings under `/etc/apt/keyrings`
+are globally eligible. Vendor keys remain usable solely through their explicit
+source paths. Pin files first allow only the reviewed package names at priority
+500 and then assign priority `-1` to every other package from that origin.
+Nightly/beta packages are not eligible.
+
+### 6.2 Keyring checksums
+
+| Keyring | Primary fingerprint | SHA-256 |
+|---|---|---|
+| Brave | `DBF1 A116 C220 B8C7 164F 9823 0686 B784 2003 8257` | `c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788` |
+| Element | `12D4 CD60 0C22 40A9 F4A8 2071 D7B0 B669 41D0 1538` | `c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955` |
+
+`brave-keyring` may create a compatibility symlink in global APT trust. In
+addition, the reviewed Brave Origin 1.93 package currently generates a second
+Deb822 source for Google's Chrome repository and an associated key under
+`/usr/share/keyrings`. Neither object belongs to the EDBP trust model. Hook
+`020` accepts only the reviewed shapes, removes them, and aborts on drift. The
+tracked Brave repository remains the sole update path. Hook `050` verifies the
+final scoped keyring bytes and confirms that the additional Origin source and
+key did not survive.
+
+Direct rolling vendor repositories are not reproducible across dates. A production
+release SHOULD use a snapshot or controlled internal mirror and retain the
+generated `.packages` manifest.
+
+---
+
+## 7. Package inventory and dependency ownership
+
+APT Recommends are disabled globally. Every operational recommendation needed
+by the workstation role is promoted into a tracked package list.
+
+### 7.1 Desktop
+
+| Function | Explicit packages |
+|---|---|
+| Plasma/SDDM | `plasma-desktop`, `sddm`, `sddm-theme-breeze`, `xserver-xorg` |
+| Plasma operations | `kscreen`, `plasma-nm`, `plasma-pa`, `powerdevil`, `upower`, `systemsettings`, `xdg-desktop-portal-kde`, `kio-extras`, `kf6-breeze-icon-theme`, `libpam-kwallet5` |
+| User shell | `dolphin`, `konsole`, `ark`, `kate`, `lsof`, `sonnet6-plugins`, `7zip`, `bzip2`, `unzip`, `zip` |
+| Network | `network-manager`, `wpasupplicant`, `wireless-regdb` |
+| Audio | `pipewire`, `pipewire-pulse`, `pipewire-alsa`, `wireplumber`, `rtkit` |
+
+`task-kde-desktop`, `kde-standard`, Discover, games, PIM, Welcome, BlueDevil,
+and `pipewire-audio` are excluded. `pipewire-audio` would hard-depend on the
+Bluetooth SPA plugin in Debian 13.
+
+`libpam-kwallet5` is promoted from Plasma's Recommends because global
+`--apt-recommends false` would otherwise leave SDDM's existing optional
+`pam_kwallet5` hooks without their module. The installed-user wallet is then
+unlocked by the SDDM login password. KWallet is not globally disabled: doing so
+would weaken credential storage for NetworkManager and KDE applications.
+
+### 7.2 Productivity and fonts
+
+| Function | Explicit packages |
+|---|---|
+| Office | `libreoffice-writer`, `libreoffice-calc`, `libreoffice-impress`, `libreoffice-math` |
+| KDE integration | `libreoffice-kf6`, `libreoffice-plasma`, `libreoffice-style-breeze` |
+| Arabic | `libreoffice-l10n-ar`, `hunspell-ar`, `mythes-ar` |
+| Fonts | `fonts-noto-core`, `fonts-noto-color-emoji`, `fonts-liberation`, `fonts-liberation-sans-narrow`, `fonts-croscore`, `fonts-crosextra-caladea`, `fonts-crosextra-carlito`, `fonts-sil-scheherazade` |
+
+`fonts-noto-extra` is intentionally excluded because its installed footprint is
+not justified by the English/Arabic role.
+
+### 7.3 Applications
+
+| Application | Package and rationale |
+|---|---|
+| Brave Origin | `brave-origin`; official standalone minimal Linux build, updated only through the pinned Brave repository |
+| Element | `element-desktop`; no homeserver/account preconfiguration |
+| KeePassXC | `keepassxc-minimal`; browser integration, SSH agent, networking, and Secret Service features excluded |
+| Icons | `fonts-font-awesome`; explicit KeePassXC UI dependency |
+
+### 7.4 Printing and scanning
+
+| Function | Explicit packages |
+|---|---|
+| Print core | `cups`, `cups-client`, `cups-filters`, `cups-browsed`, `cups-pk-helper` |
+| Discovery/UI | `avahi-daemon`, `libnss-mdns`, `ipp-usb`, `print-manager`, `system-config-printer-udev` |
+| Drivers | `printer-driver-all` plus every Trixie driver named in `hardware-printers.list.chroot` |
+| HP | `hplip`, `hplip-gui`, `printer-driver-hpcups`, `printer-driver-postscript-hp` |
+| Epson | `printer-driver-escpr` |
+| Scanners | `sane-utils`, `sane-airscan`, `simple-scan` |
+
+`printer-driver-all` contains drivers as Recommends, so its Trixie set is
+expanded explicitly. Proprietary HP plug-ins and Epson ESC/P-R2 packages are
+not universal and require a model-specific signed-package review.
+The HP GUI remains available on demand, while hook `040` sets `Hidden=true` on
+the package's XDG autostart descriptor so `hp-systray` does not consume memory
+or execute Python helpers in every user session.
+
+### 7.5 Security, identity, and Live runtime
+
+| List | Packages |
+|---|---|
+| Security | `usbguard`, `nftables`, `openssh-server`, `sudo`, `ca-certificates` |
+| OOBE | `whiptail`, `passwd`, `python3-minimal`, `kbd` |
+| Live runtime | `user-setup`, `locales`, `keyboard-configuration`, `console-setup` |
+| Live-only installer UI | `debian-installer-launcher`; `_live` suffix causes removal from installed target |
+
+---
+
+## 8. Kernel and Bluetooth denial
+
+Bluetooth is denied at three points:
+
+1. `module_blacklist=bluetooth,btusb` on Live and Installer kernel command
+   lines;
+2. aliases blacklisted for `bluetooth`, `btusb`, vendor transport modules,
+   HCI UART, BNEP, RFCOMM, and HIDP;
+3. explicit `install /bin/false` for the primary load paths.
+
+`bluez`, `bluedevil`, and `libspa-0.2-bluetooth` are forbidden packages.
+
+Verification on an installed machine:
+
+```bash
+dpkg-query -W bluez bluedevil libspa-0.2-bluetooth 2>&1
+sudo modprobe bluetooth && echo FAIL || echo PASS
+sudo modprobe btusb && echo FAIL || echo PASS
+lsmod | grep -E '^(bluetooth|btusb)\b' && echo FAIL || echo PASS
+```
+
+---
+
+## 9. USBGuard policy
+
+USB Mass Storage and UAS are controlled exclusively by USBGuard. Kernel module
+blacklisting is forbidden because it would prevent even root from granting an
+approved exception.
+
+### 9.1 Class rule
+
+```text
+block with-interface one-of { 08:*:* }
+allow with-interface match-all { 03:*:* 06:*:* 07:*:* }
+```
+
+The first rule explicitly blocks any device exposing a Mass Storage interface
+(`08`), including composite devices. The second rule requires the complete
+interface set of every allowed device to be a subset of:
+
+| Class | Meaning |
+|---|---|
+| `03` | HID keyboard/mouse |
+| `06` | Still imaging/scanner |
+| `07` | Printer |
+
+An unconditional `allow` rule is forbidden: it would permit every non-storage
+USB class and convert the policy from an allowlist into a broad blocklist. All
+unmatched devices inherit `ImplicitPolicyTarget=block`. The rules are embedded
+in the image and loaded when `usbguard.service` starts; they are not appended
+after boot, which avoids an unenforced race window.
+
+### 9.2 Daemon behavior
+
+- present and newly inserted devices are evaluated against policy;
+- controllers keep their state;
+- default kernel authorization is `none`;
+- audit output is written to `/var/log/usbguard/usbguard-audit.log`;
+- USBGuard does not start in a USB-booted Live session because that would deny
+  the class-08 boot medium.
+
+### 9.3 IPC delegation
+
+Root has full IPC access. The `sudo` group may:
+
+- list/listen/modify device authorization;
+- list policy;
+- listen for exception events.
+
+It cannot arbitrarily rewrite policy. Temporary administrator exception:
+
+```bash
+sudo usbguard list-devices
+sudo usbguard allow-device DEVICE_ID
+```
+
+Use `--permanent` only after change approval because it writes a device rule.
+
+External USB hubs use class `09` and are not generically allowed. Docks and
+vendor-specific scanner class `ff` devices require explicit inventory rules;
+this is a mandatory hardware acceptance item.
+
+---
+
+## 10. nftables public baseline
+
+The tracked ruleset is an EDBP-generic workstation baseline. Its normative hash
+is:
+
+```text
+85d3cddb2f5abee964ec4632de0ef0a3197fea950f893b3b74b164a475ff1f7c
+```
+
+Build hooks check the hash and nftables syntax rather than silently rewriting
+the rules.
+
+### 10.1 Effective policy
+
+- invalid state dropped;
+- loopback accepted in both directions;
+- established/related state accepted in both directions;
+- IPv4 and IPv6 private/link-local address spaces defined only by standards;
+- ICMP and key-only SSH accepted inbound only from those private/link-local ranges;
+- all other new inbound traffic dropped;
+- new outbound traffic accepted only to those private/link-local ranges;
+- forwarding dropped.
+
+This preserves EDBP's controlled, default-deny LAN posture without encoding a
+deployment-specific subnet, host, domain, interface name, or operational
+exception. It also adds a generic IPv6 private/link-local
+scope and narrows new inbound traffic to diagnostics and SSH.
+
+### 10.2 Service/port exposure table
+
+| Port/protocol | Owner | Public-baseline behavior |
+|---|---|---|
+| 22/TCP | OpenSSH | Reachable from standards-defined private/link-local sources; key-only `edbpadmin` |
+| 53/TCP+UDP | Resolver | Allowed only when the destination is in the private/link-local sets |
+| 67/68 UDP | DHCP | IPv4 broadcast is outside the destination sets and remains blocked |
+| 80/443 TCP | APT/Brave/Element/Matrix | Allowed only to private/link-local destinations; public internet denied |
+| 123/UDP | NTP | Allowed only to private/link-local destinations |
+| 631/TCP+UDP | CUPS/IPP | Outbound private/link-local use allowed; new inbound service traffic dropped |
+| 5353/UDP | Avahi/mDNS | Multicast destination is outside the private/link-local sets and remains blocked |
+| 3702/UDP | WSD scanner discovery | Multicast destination is outside the private/link-local sets and remains blocked |
+
+### 10.3 Downstream policy
+
+A deployment that uses public addressing, needs additional inbound services,
+requires proxy-only egress, or depends on DHCP/service discovery must replace
+this file in a separate downstream customization. The override must document
+its threat model, accepted source networks and ports, IPv6 behavior,
+DHCP/discovery requirements, and review owner. Disabling `nftables.service` is
+not part of the public baseline workflow.
+
+---
+
+## 11. SSH and administrative identity
+
+### 11.1 Build inputs
+
+The operator supplies two ignored files:
+
+```text
+secrets/edbpadmin_authorized_keys
+secrets/edbpadmin_password_hash
+```
+
+`scripts/stage-admin-keys` accepts 1–20 unadorned ED25519 or security-key
+ED25519 public keys, validates them with `ssh-keygen`, removes blank/full-line
+comment records while preserving each public key's inline label, and writes an
+ignored mode-0600 installer input. RSA and private keys are rejected.
+
+`scripts/stage-edbpadmin-password` accepts exactly one newline-terminated
+yescrypt (`$y$`) or SHA-512-crypt (`$6$`) record. The source must be a regular,
+non-symlink file owned by the invoking build user with no group/other access.
+Its parent must be owned by root/the build user and not group/other writable.
+The script replaces exactly one token in `preseed.cfg.in`, rejects plaintext
+password questions, and atomically writes ignored `preseed.cfg` with mode
+0600. It never prints or passes the hash as a process argument.
+
+These tasks remain separate by design: public-key normalization and secret
+preseed rendering have different input classes, validators, and cleanup
+requirements. `stage-build-inputs` in the Makefile composes them transactionally.
+
+### 11.2 Installed policy
+
+- only `edbpadmin` may use SSH;
+- root SSH login denied;
+- password and keyboard-interactive SSH denied;
+- `AuthenticationMethods publickey` required;
+- forwarding, agent forwarding, X11, tunnels, gateway ports, and user
+  environment denied;
+- verbose authentication logging, three attempts, 30-second grace time.
+
+The shared console password remains necessary for local login and
+password-authenticated `sudo`; it is never an SSH method. This shared-password
+exception MUST be retired in favor of per-machine random escrow, centralized
+identity, or another reviewed privileged-access design once SSH management is
+operational.
+
+### 11.3 Per-machine SSH identity
+
+The installer late command removes copied host-key material and runs
+`ssh-keygen -A` inside `/target`. Two installed machines MUST have different
+host-key and machine-id hashes.
+
+---
+
+## 12. Debian Installer and partition safety
+
+The rendered partial preseed answers locale, timezone, fixed admin username,
+the encrypted `edbpadmin` password, root-login policy, offline network policy,
+mirror policy, and GPT default. It deliberately does not answer:
+
+- target disk;
+- partitioning method or recipe;
+- removal of existing LVM/MD metadata;
+- final partition selection;
+- write-label or destructive confirmation;
+- plaintext `passwd/user-password` or `passwd/user-password-again` fields;
+- any root-password field.
+
+Only `passwd/user-password-crypted` is seeded. This causes Debian Installer to
+skip both interactive user-password prompts without exposing plaintext to
+debconf. It does not hide the resulting hash from an operator who can inspect
+the ISO/initrd or an installed machine's protected shadow database.
+
+`netcfg/enable=false` disables all Debian Installer network configuration.
+The image installs its reviewed root filesystem directly from the ISO and does
+not require DHCP, Wi-Fi scanning, DNS, or an APT mirror. This also prevents the
+legacy `netcfg` scanner from exercising recent Intel WLAN firmware during
+installation. NetworkManager owns networking only after the installed system
+boots; OOBE subsequently replaces the image's temporary hostname.
+
+APT mirror use is disabled during installation. The stock `40cdrom` generator
+is replaced inside the installer initrd by a contract-compatible empty
+generator because this Live hybrid ISO is not a Debian package disc. The
+complete SquashFS is copied to the target; no packages are fetched from the
+medium. `apt-setup/disable-cdrom-entries=true` prevents a removable-media entry
+from surviving, while a tracked Deb822 `debian.sources` file provides the
+official Debian and security repositories after installation.
+
+`partman/early_command` invokes `/edbp-partman-policy`. It refuses installation
+when `/sys/firmware/efi` is absent. Software RAID is not supported in the
+v2.2.0 workstation baseline: the reduced installer initrd intentionally does
+not embed the version-coupled `md-modules-*-amd64-di` udeb. The policy scans raw
+block devices for `linux_raid_member` metadata and fails closed if any member
+is found. Only after that check does it create `/var/lib/partman/md`, causing
+`partman-md` to skip its unavailable-module probe and eliminating the
+misleading RAID dialog during normal single-disk/LVM installation. Adding MD
+support later requires matching installer kernel udebs and a separate RAID
+destruction/recovery acceptance plan; it must not be enabled by a blind
+`modprobe` workaround.
+
+The installer flow is:
+
+```text
+UEFI boot
+  -> graphical Debian Installer
+  -> reviewed locale/time defaults
+  -> installer network configuration skipped
+  -> UEFI/non-RAID storage policy checked
+  -> injected crypt(3) hash creates edbpadmin without a password prompt
+  -> operator selects disk and partitioning/encryption
+  -> operator confirms destructive write
+  -> Live filesystem copied to /target
+  -> apt-cdrom skipped; tracked Debian sources retained
+  -> deterministic regular /etc/hostname and /etc/hosts materialized
+  -> edbp-late-command validates edbpadmin and sudo
+  -> public authorized_keys installed
+  -> unique SSH host keys generated
+  -> ssh/nftables/usbguard/OOBE enabled
+  -> reboot
+```
+
+An installation that does not display disk selection and final destructive
+confirmation is a release failure.
+
+---
+
+## 13. OOBE transaction model
+
+### 13.1 Unit ordering
+
+`edbp-oobe.service` is a TTY1 oneshot ordered before SDDM. An SDDM drop-in
+requires it, preventing an empty graphical login chooser before a daily user
+exists. The service skips:
+
+- Live sessions containing `/run/live/medium`;
+- completed systems containing `/var/lib/edbp/oobe-complete`.
+
+### 13.2 Preconditions
+
+OOBE refuses to proceed unless:
+
+- it runs as root;
+- `/etc/hostname` and `/etc/hosts` are regular files;
+- `edbpadmin` exists;
+- `edbpadmin` belongs to `sudo`;
+- the sudoers policy exists.
+
+### 13.3 Inputs and validation
+
+- hostname: 1–63 lowercase letters, digits, and internal hyphens;
+- daily username: lowercase POSIX-safe name, not already a user/group;
+- password: 12–128 characters, not equal to username, entered twice;
+- final summary confirmation required.
+
+### 13.4 Commit and rollback
+
+Before its first mutation, OOBE atomically publishes a root-owned mode-0700
+rollback journal at `/var/lib/edbp/oobe-transaction`. The journal records the
+previous hostname files and the validated account name. OOBE then creates a
+private primary-group account, verifies that `scanner` is its only
+supplementary group, updates hostname state, calls `sync`, and finally renames
+an atomic completion marker. `scanner` is required by Debian's libsane udev
+ACL; it does not grant system administration.
+
+A normal error or signal rolls the journal back immediately. If power is lost
+before marker commit, the next OOBE start verifies the journal's type,
+ownership, mode, files, username, and expected home path before restoring the
+hostname and deleting only that incomplete account. If power is lost after
+marker commit, the completed account/hostname state is authoritative; a stale
+root-only journal may remain but is never replayed.
+
+After marker durability, service enablement is removed. The marker remains
+authoritative because a dependency may activate a disabled unit.
+
+---
+
+## 14. Desktop and application policy
+
+### 14.1 SDDM and sudo
+
+`HideUsers=edbpadmin` is chooser cosmetics, not access control. Typed-name
+login remains possible. `RememberLastUser=false` prevents leaking the most
+recent account. Sudo requires the edbpadmin password; `NOPASSWD` is forbidden.
+
+### 14.2 Brave
+
+Managed policy enforces:
+
+- DuckDuckGo default search and suggestions.
+
+Homepage, startup, and new-tab behavior use Brave defaults. A deployment may
+add a managed portal URL in a separate downstream policy. Verify effective
+policy at `brave://policy`.
+
+### 14.3 LibreOffice
+
+The administrator `.xcd` locks:
+
+- Arabic UI locale;
+- Tabbed Notebookbar for Writer, Calc, and Impress;
+- DOCX default filter for text documents;
+- XLSX default filter for spreadsheets;
+- PPTX default filter for presentations.
+
+Common Microsoft MIME types map to the corresponding LibreOffice desktop
+files. OOXML default save improves interoperability but does not guarantee
+lossless Microsoft Office round trips; representative documents MUST be tested.
+
+### 14.4 KDE locale and keyboard
+
+- Plasma/SDDM language: `en_US.UTF-8`;
+- generated locales: `en_US.UTF-8`, `ar_SY.UTF-8`;
+- layouts: `us,ara`;
+- option: `grp:alt_shift_toggle`;
+- KDE system configuration is marked immutable with `$i`.
+
+Hook `040` materializes `/etc/default/locale -> ../locale.conf` after package
+installation. It accepts an existing reviewed link or replaces only a regular
+root-owned package-generated file; any other object aborts the build.
+
+### 14.5 Desktop indexing
+
+`/etc/xdg/baloofilerc` immutably disables Baloo content indexing. This removes
+background database I/O and metadata retention on the 4 GiB sensitive
+workstation baseline. Dolphin browsing remains available, but indexed
+full-content search is intentionally not promised.
+
+### 14.6 Explicit no-Recommends runtime closure
+
+Because APT Recommends are disabled, EDBP explicitly installs `console-setup`
+for Live keyboard application, `rtkit` for PipeWire scheduling, `upower` for
+PowerDevil battery/power state, `sonnet6-plugins` for Kate spellchecking,
+`kf6-breeze-icon-theme` for the Plasma icon set, and `lsof` for Dolphin's
+open-file diagnostics. Their absence is a release failure, not an acceptable
+minimal-image tradeoff.
+
+---
+
+## 15. Hook execution order
+
+`live-build` executes its packaged `config/hooks/normal/*.chroot` hooks before
+the repository's `config/hooks/live/*.chroot` hooks, then runs its
+`chroot_hacks` stage. In particular, normal hook 8050 removes image-baked SSH
+host keys before EDBP hook `060` runs. Hook `060` therefore validates `sshd`
+against an ephemeral ED25519 key under `/run`, removes that key on exit, and
+never repopulates `/etc/ssh` in the image. `chroot_hacks` subsequently rebuilds
+all initramfs images—capturing the Bluetooth modprobe policy—and removes the
+Live image's `/etc/hosts`; the installer late command explicitly materializes
+regular target hostname/hosts files and creates persistent, unique SSH host
+keys in each installed target.
+
+| Hook | Responsibility | Failure behavior |
+|---|---|---|
+| `010` | Remove broad USBGuard `plugdev` ACL, mask D-Bus unit/activation alias, set mode 0600 | Unexpected ACL/object or mask failure aborts |
+| `020` | Remove Brave global-trust compatibility symlink | Unexpected target/object aborts |
+| `030` | Enable nftables public baseline and USBGuard | Enable failure aborts |
+| `040` | Permissions, sudo/JSON/XML/OOBE/systemd validation, LibreOffice link, locales, OOBE enablement | Any policy mismatch aborts |
+| `050` | Keyring/nftables hash, nft/USBGuard syntax, forbidden packages/modules, unit/mask checks | Any drift aborts |
+| `060` | SSH effective-policy verification with an ephemeral host key; enable SSH/network/print services; disable network SANE | Any required unit/policy failure aborts |
+| `090` | APT/temp/cache/log cleanup | Filesystem error aborts |
+
+Hooks use `set -eu` and are executable. They must fail closed instead of
+silently repairing an unreviewed object.
+
+Hook `040` invokes `systemd-analyze verify --man=no`: dependency, executable,
+unit, and drop-in validation remain active, while only `Documentation=man:`
+existence checks are skipped. The minimal image intentionally omits manpages,
+so treating absent SDDM documentation as a service failure would be a false
+positive and installing `man-db` solely to satisfy that check would be bloat.
+
+---
+
+## 16. Service policy
+
+| Unit | Installed state | Rationale |
+|---|---|---|
+| `nftables.service` | enabled | Generic private-network default-deny baseline |
+| `usbguard.service` | enabled installed system; condition-skipped Live | USB authorization enforcement |
+| `ssh.service` | enabled | Key-only edbpadmin management |
+| `edbp-oobe.service` | enabled until completion marker | First-boot identity |
+| `sddm.service` | waits for OOBE | Prevent premature login UI |
+| `NetworkManager.service` | enabled | Desktop LAN/Wi-Fi management |
+| `cups.service`, `cups.socket` | enabled | Printing |
+| `cups-browsed.service` | enabled | Accepted Plug-and-Play/network discovery cost |
+| `avahi-daemon.service` | enabled | mDNS/IPP discovery |
+| `saned.socket`, `saned@.service` | disabled | Local SANE does not require a network scanner server |
+| `usbguard-dbus.service` and D-Bus alias | masked plus deny-activation drop-in | CLI talks directly to daemon; survives package-level enablement drift and blocks the broader Polkit surface |
+
+The enabled discovery daemons are an accepted footprint and LAN attack-surface
+cost. CUPS/Avahi behavior MUST be tested on the production VLAN.
+
+---
+
+## 17. Build automation
+
+### 17.1 Required build-host packages
+
+On a clean Debian 13 amd64 builder:
+
+```bash
+sudo apt update
+sudo apt install --yes \
+    live-build debootstrap squashfs-tools xorriso \
+    grub-efi-amd64-bin shim-signed mtools dosfstools \
+    make git jq openssh-client sudo shellcheck \
+    debconf-utils python3 ca-certificates whois
+```
+
+Build as an unprivileged dedicated user with narrowly controlled sudo access
+to `lb build`/`lb clean`. Do not build inside a developer's daily workstation
+profile for a signed release.
+
+### 17.2 Administrative build inputs
+
+```bash
+install -d -m 0700 secrets
+ssh-keygen -t ed25519 -a 100 -f secrets/edbp_admin -C edbp-admin
+install -m 0600 secrets/edbp_admin.pub secrets/edbpadmin_authorized_keys
+
+# Prompts on the terminal; plaintext is not placed in argv or shell history.
+( umask 077; mkpasswd --method=yescrypt > secrets/edbpadmin_password_hash )
+chmod 0600 secrets/edbpadmin_password_hash
+```
+
+The private file `secrets/edbp_admin` must be moved to approved key custody and
+must never accompany the ISO. The password itself MUST be generated and stored
+through the approved credential vault; it MUST NOT appear in a command-line
+argument, ticket, Git commit, build log, or technician document.
+
+The shared password SHOULD have at least 20 randomly generated characters.
+Human-memorable organizational names, seasons, keyboard walks, and predictable
+suffixes are prohibited. A salted password hash slows guessing but does not
+prevent offline guessing after ISO extraction.
+
+### 17.3 Injection and cleanup transaction
+
+`make config` first runs the clean-tree verifier, stages the normalized public
+keys, and renders the encrypted-password line from `preseed.cfg.in`. The real
+hash is read from the source file inside the renderer; it is never interpolated
+by Make or placed in process arguments. If either staging operation fails, both
+outputs are deleted.
+
+The generated files are:
+
+```text
+config/includes.installer/edbpadmin_authorized_keys
+config/includes.installer/preseed.cfg
+edbp-2.2.0-amd64.build-inputs.json
+```
+
+The first two exist only because `live-build` must read them while assembling
+the installer initrd. `make build` and the production `make all` entry point
+install EXIT/signal traps that remove both secret-bearing files after success,
+failure, or interrupt. `make config` intentionally leaves them staged for a
+later build and therefore prints a warning; the operator MUST follow it with
+`make build` or `make clean`.
+
+The third file is a non-secret provenance artifact created at staging time. It
+contains only SHA-256 fingerprints of the exact normalized public keys,
+injected crypt string, template, and rendered preseed. Capturing these values
+before the long build closes the race where a source secret could be rotated
+mid-build and later be misidentified as the value embedded in the ISO.
+
+The source files under `secrets/` are not deleted automatically. They are
+external controlled inputs and remain under the build-controller custody
+policy. Neither provenance JSON file contains the password hash value.
+
+### 17.4 Targets
+
+| Target | Behavior |
+|---|---|
+| `make verify` | Require and validate both real inputs; render preseed only in a temporary directory; run all static/security checks |
+| `make verify-test` | Permit a synthetic non-login hash only for temporary static validation when the real hash file is absent; cannot satisfy build dependencies |
+| `make stage-build-inputs` | Transactionally stage public keys and the rendered secret-bearing preseed |
+| `make config` | Verify, stage both inputs, run repository `auto/config`; leaves staged files for build |
+| `make build` | Configure, run privileged `lb build` (`sudo` for the normal unprivileged builder), retain `build.log`, scrub staged inputs on every exit path |
+| `make all` | Trap cleanup, build, create checksums/manifest, and verify checksums |
+| `make verify-checksums` | Verify existing `SHA256SUMS` and manifest paths |
+| `make scrub-build-inputs` | Delete only generated preseed and staged authorized keys |
+| `make clean` | Purge live-build state and generated artifacts/staged inputs; preserve source secrets |
+
+`make config` and `make build` force a build-safe `umask 022`. Secret staging
+scripts independently enforce `umask 077`, and the password-generation example
+uses a subshell so a restrictive umask cannot leak into `live-build`. This keeps
+APT's `_apt` sandbox able to traverse its cache instead of falling back to an
+unsandboxed root download.
+
+Production build:
+
+```bash
+git status --short
+git check-ignore --quiet secrets/edbpadmin_password_hash
+make clean
+make verify
+make all
+```
+
+Expected artifacts:
+
+```text
+edbp-2.2.0-amd64.hybrid.iso
+edbp-2.2.0-amd64.packages
+edbp-2.2.0-amd64.build-inputs.json
+edbp-2.2.0-amd64.manifest.json
+SHA256SUMS
+build.log
+```
+
+The JSON manifest records version, architecture, Git commit,
+`SOURCE_DATE_EPOCH` and its UTC rendering, manifest-creation time, SHA-256
+fingerprints for the normalized public-key payload, injected password hash,
+preseed template, rendered preseed, plus ISO, package-manifest, and
+build-input-record hashes. `make verify-checksums` recomputes every recorded
+artifact identity except the informational manifest-creation time.
+
+---
+
+## 18. Static and forensic verification
+
+### 18.1 Repository checks
+
+```bash
+git status --short
+git fsck --full
+git diff --check origin/main...HEAD
+make verify
+git grep -nE 'BEGIN (OPENSSH|RSA|EC|DSA|PRIVATE) PRIVATE KEY' -- .
+git check-ignore --quiet secrets/edbpadmin_password_hash
+test "$(stat -c '%a' secrets/edbpadmin_password_hash)" = 600
+```
+
+`make verify` intentionally refuses a dirty source tree. During development
+only, `EDBP_ALLOW_DIRTY=1` may be supplied; such a build cannot be released.
+If the real hash file is intentionally absent during source-only CI,
+`make verify-test` renders a synthetic non-login hash solely under `mktemp`.
+That fallback is not reachable from `make config`, `make build`, or `make all`.
+
+### 18.2 ISO structure and UEFI
+
+```bash
+sha256sum --check --strict SHA256SUMS
+xorriso -indev edbp-2.2.0-amd64.hybrid.iso \
+    -report_el_torito as_mkisofs
+xorriso -indev edbp-2.2.0-amd64.hybrid.iso \
+    -find /EFI -type f -exec lsdl
+```
+
+Acceptance:
+
+- EFI boot image present;
+- no legacy isolinux/BIOS boot catalog entry;
+- graphical installer and Live entries present;
+- embedded installer initrd contains `/preseed.cfg`, `/edbp-late-command`, and
+  `/edbpadmin_authorized_keys`;
+- `/preseed.cfg` contains exactly one `$y$` or `$6$`
+  `passwd/user-password-crypted` record, contains no plaintext-password
+  record, and contains no unresolved template token;
+- `/preseed.cfg` contains exactly `d-i netcfg/enable boolean false` and no
+  other `netcfg/*` question;
+- `/preseed.cfg` disables mirror and cdrom APT sources during installation and
+  invokes `/edbp-partman-policy`;
+- installer initrd contains executable `/edbp-partman-policy` and the EDBP
+  `40cdrom` no-op generator;
+- no SSH private key exists anywhere in the ISO.
+
+### 18.3 UEFI VM boot
+
+Example non-Secure-Boot test:
+
+```bash
+cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/edbp-vars.fd
+qemu-system-x86_64 \
+    -enable-kvm \
+    -machine q35 \
+    -cpu host \
+    -smp 4 \
+    -m 4096 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/edbp-vars.fd \
+    -drive if=virtio,format=qcow2,file=/var/lib/edbp-test/disk01.qcow2 \
+    -cdrom edbp-2.2.0-amd64.hybrid.iso \
+    -boot d
+```
+
+Repeat with the distribution's Secure-Boot OVMF code and enrolled Microsoft/
+Debian keys when Secure Boot is an acceptance requirement.
+
+### 18.4 Installer acceptance
+
+For NVMe-emulated and SATA-emulated disks, verify:
+
+1. no BIOS boot path;
+2. installer `en_US.UTF-8` locale and `Etc/UTC` timezone defaults;
+3. no network-interface, DHCP, Wi-Fi, edbpadmin, or root password prompt appears;
+4. no software-RAID-unavailable or APT-media-configuration dialog appears on
+   ordinary non-RAID disks;
+5. disk and recipe selection remain interactive;
+6. final destructive confirmation appears;
+7. GPT and EFI System Partition are created for guided UEFI installation;
+8. installed system boots without ISO;
+9. NetworkManager discovers networking only after installed boot;
+10. the controlled shared password authenticates `edbpadmin` locally and
+   satisfies password-required `sudo`;
+11. OOBE blocks SDDM until completion;
+12. `apt-get update` reaches the configured repositories through an approved
+    private mirror or a reviewed downstream connected-network policy;
+13. an SDDM password login unlocks KWallet without a second password prompt.
+
+### 18.5 Installed-system checks
+
+```bash
+systemctl is-enabled nftables usbguard ssh edbp-oobe
+systemctl --failed
+sudo nft --check --file /etc/nftables.conf
+sudo nft list ruleset
+sudo usbguard list-rules
+sudo usbguard list-devices
+sudo sshd -T -C user=edbpadmin,host=localhost,addr=127.0.0.1 \
+    | grep -E '^(permitrootlogin|passwordauthentication|authenticationmethods|allowusers) '
+sudo visudo -cf /etc/sudoers.d/edbpadmin
+id edbpadmin
+getent passwd DAILY_USER
+id DAILY_USER
+test -e /var/lib/edbp/oobe-complete
+```
+
+Daily-user acceptance: no `sudo`, `lpadmin`, or `plugdev` membership;
+`scanner` is the only supplementary group.
+
+### 18.6 Identity uniqueness across two installs
+
+Run on each installed VM and compare:
+
+```bash
+sha256sum /etc/machine-id
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+stat -c '%a %U:%G %n' /home/edbpadmin/.ssh \
+    /home/edbpadmin/.ssh/authorized_keys
+```
+
+Machine-id and SSH host fingerprints MUST differ. Authorized-key content may be
+the same approved fleet management key.
+
+### 18.7 Application acceptance
+
+- `brave://policy` shows all EDBP policies as mandatory with no errors;
+- homepage, startup, and new-tab behavior remain at Brave defaults;
+- DuckDuckGo is the locked search provider;
+- a new LibreOffice profile opens Arabic Tabbed UI;
+- new Writer/Calc/Impress documents default to DOCX/XLSX/PPTX;
+- representative Arabic/English Office files survive round-trip testing;
+- each approved printer/scanner model prints/scans over its production path;
+- HID works, storage blocks, mixed HID+storage blocks, and edbpadmin temporary
+  authorization behaves as documented.
+
+---
+
+## 19. Release gates
+
+### P0 — mandatory before any workstation deployment
+
+- clean committed source and reviewed PR;
+- real ED25519 admin public-key input, private key in approved custody;
+- real high-entropy edbpadmin hash input owned/mode-0600 on the isolated build
+  controller; password held in the approved vault;
+- documented shared-password expiry, fleet rotation, and break-glass process;
+- successful full `make all` on Debian 13 builder;
+- checksum and provenance artifacts retained;
+- two UEFI install/boot/OOBE passes;
+- disk-confirmation test on NVMe and SATA;
+- unique machine-id and SSH host keys;
+- no failed systemd units;
+- the generic nftables baseline or a documented downstream replacement is accepted by the deployment security reviewer;
+- SSH key login succeeds and all SSH password methods fail;
+- USB policy tested against actual keyboards, mice, hubs, printers, and scanners.
+- explicit LUKS requirement/recovery-key decision for the sensitive-workstation role.
+
+### P1 — mandatory before fleet expansion
+
+- controlled APT snapshot/mirror and rollback policy;
+- printer/scanner VID/PID and vendor-package inventory;
+- enterprise CA and internal DNS/NTP validation;
+- signed release tag and immutable Git-commit-to-ISO mapping;
+- staged pilot, telemetry, incident logging, and recovery procedure.
+
+### P2 — recommended hardening backlog
+
+- formal AppArmor profile coverage report;
+- PAM password-quality/lockout policy with help-desk recovery testing;
+- auditd or equivalent privileged-session audit policy;
+- desktop-compatible sysctl baseline;
+- automated UEFI/Secure-Boot CI and SBOM generation.
+
+---
+
+## 20. Known constraints and rejected shortcuts
+
+1. **The public firewall is intentionally private-network-only.** It permits
+   diagnostics and key-only SSH from standards-defined private/link-local
+   sources and new outbound traffic only to those ranges. Public addressing,
+   DHCP broadcast, multicast discovery, additional inbound services, or public
+   internet access require a reviewed downstream ruleset.
+2. **Generic USB classes do not cover all peripherals.** Hubs and vendor class
+   scanners require inventory-specific policy.
+3. **`printer-driver-all` is not universal.** Proprietary HP/Epson support is
+   model-specific.
+4. **OOXML defaults are not perfect compatibility.** Round-trip testing is
+   mandatory.
+5. **Stopping nftables removes all filtering.** Deployment procedures should
+   keep the service enabled and apply reviewed rule changes instead.
+6. **Terminal history is not globally disabled.** Removing administrative
+   history is anti-forensic. Any standard-user privacy policy must be designed
+   separately without suppressing privileged auditability.
+7. **Rolling repositories are not bit-reproducible.** A controlled mirror is
+   required for long-term fleet reproducibility.
+8. **Dependency fonts are not deleted.** Plasma, LibreOffice, browsers, and
+   document fallback depend on additional fonts pulled by Debian. Deleting all
+   non-selected font packages would break rendering and package integrity; a
+   fontconfig policy requires a separate typography acceptance test.
+9. **The approved public wallpaper is immutable build input.** KDE defaults to
+    the supplied EDBP 1920x1080 JPEG through `/etc/xdg/plasmarc` and a
+    standard Plasma wallpaper package. The source SHA-256 is
+    `02d0f820a204d627ae742e7c034dcd3c3f4962dd55de9cc78b8a1d92f5069d34`.
+    The setting is a default for new profiles, not a lock; users may select a
+    different wallpaper. Displays above 1920x1080 will upscale this asset.
+    Copyright © 2026 Osama Haddad (Q-D-4). The wallpaper is licensed under
+    `CC-BY-SA-4.0`.
+10. **A shared fleet password has fleet-wide blast radius.** Its crypt(3) hash
+    is recoverable from every distributed ISO and installed shadow database.
+    Compromise or offline cracking of one value affects every machine built
+    from that input. Build-time injection prevents Git/log disclosure; it does
+    not create per-device uniqueness or protect a weak password. This exception
+    is acceptable only as a dated migration control, not a steady-state
+    privileged-access architecture.
+
+---
+
+## 21. Authoritative upstream references
+
+- [Debian Live Manual: customizing Debian Installer](https://live-team.pages.debian.net/live-manual/html/live-manual/customizing-installer.en.html)
+- [Debian Trixie apt-setup `40cdrom` generator](https://sources.debian.org/src/apt-setup/1%3A0.198/generators/40cdrom)
+- [Debian Trixie partman-md module probe](https://sources.debian.org/src/partman-md/114/init.d/md-devices)
+- [Debian Trixie `libpam-kwallet5`](https://packages.debian.org/trixie/amd64/libpam-kwallet5)
+- [Debian 13 Installer Manual: loading preseed](https://www.debian.org/releases/trixie/amd64/apbs02.en.html)
+- [Debian 13 Installer Manual: preseed contents](https://www.debian.org/releases/trixie/amd64/apbs04.en.html)
+- [Debian Trixie `live-build` manpages](https://manpages.debian.org/trixie/live-build/)
+- [USBGuard rule language](https://manpages.debian.org/trixie/usbguard/usbguard-rules.conf.5)
+- [Debian nftables package source and service behavior](https://sources.debian.org/src/nftables/)
+- [Brave enterprise Group Policy guidance](https://support.brave.com/hc/en-us/articles/360039248271-Group-Policy)
+- [Chromium enterprise policy catalogue used by Brave](https://chromeenterprise.google/policies/)
+- [LibreOffice ToolbarMode schema and data](https://github.com/LibreOffice/core/tree/master/officecfg/registry)
+- [KDE Baloo source and autostart condition](https://invent.kde.org/frameworks/baloo)
+
+---
+
+## 22. Change control
+
+Any change to the following is security-significant and requires review plus a
+new artifact manifest:
+
+- package list or repository/pinning/keyring;
+- `auto/config` boot or installer options;
+- nftables bytes/hash;
+- USBGuard policy or IPC ACL;
+- Bluetooth module denial;
+- SSH policy or injected public keys;
+- password-hash algorithm, source, rotation, renderer, or staged output;
+- Preseed identity/partitioning questions or template token;
+- installer late command;
+- OOBE transaction/marker behavior;
+- enabled daemon set;
+- application managed policy.
+
+The repository history, signed release tag, `.packages` manifest,
+`SHA256SUMS`, and JSON manifest together form the minimum release provenance
+record.

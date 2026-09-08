@@ -1,0 +1,38 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${project_root}"
+
+fail() {
+    printf 'ERROR: in-target stdout regression: %s\n' "$1" >&2
+    exit 1
+}
+
+late_command=config/includes.installer/edbp-late-command
+
+# Exact source lines are intentionally literal; the test shell must not expand
+# their command substitutions or variables.
+# shellcheck disable=SC2016
+for required_query in \
+    'admin_home=$(in-target --pass-stdout getent passwd "${ADMIN_USER}" | awk -F: '\''{print $6}'\'')' \
+    'admin_uid=$(in-target --pass-stdout id -u "${ADMIN_USER}")' \
+    'admin_gid=$(in-target --pass-stdout id -g "${ADMIN_USER}")'; do
+    grep -Fqx "${required_query}" "${late_command}" \
+        || fail "required stdout-forwarding query is missing: ${required_query%%=*}"
+done
+
+if awk '
+    /in-target/ \
+        && (index($0, "$(") || index($0, "|")) \
+        && !index($0, "in-target --pass-stdout") {
+        print NR ":" $0
+        unsafe = 1
+    }
+    END { exit !unsafe }
+' "${late_command}"; then
+    fail 'captured or parsed in-target output lacks --pass-stdout'
+fi
+
+printf '%s\n' 'in-target stdout policy regression passed.'

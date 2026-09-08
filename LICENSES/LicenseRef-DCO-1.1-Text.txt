@@ -1,0 +1,5 @@
+Developer Certificate of Origin 1.1 Text Redistribution Notice
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+
+Everyone is permitted to copy and distribute verbatim copies of the Developer Certificate of Origin 1.1 document, but changing it is not allowed.

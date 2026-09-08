@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+# Keep package metadata reproducible while removing caches that have no runtime
+# value. The installed system can regenerate APT indexes with apt update.
+apt-get clean
+
+for directory in \
+    /var/lib/apt/lists \
+    /var/cache/apt/archives \
+    /tmp \
+    /var/tmp \
+    /root/.cache; do
+    if [ -d "${directory}" ]; then
+        find "${directory}" -mindepth 1 -delete
+    fi
+done
+
+find /var/log -type f -exec truncate --size 0 {} +
+rm -f -- /root/.bash_history
+
+# Machine identity and SSH host-key uniqueness are also handled by Debian
+# live-build's normal sanitization hooks and are verified after installation.

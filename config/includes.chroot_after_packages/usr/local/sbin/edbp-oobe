@@ -1,0 +1,430 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+readonly STATE_ROOT=/var/lib/edbp
+readonly TRANSACTION=${STATE_ROOT}/oobe-transaction
+readonly MARKER=${STATE_ROOT}/oobe-complete
+readonly ADMIN_USER=edbpadmin
+readonly SCANNER_GROUP=scanner
+readonly TITLE='EDBP First-Boot Setup'
+
+work_dir=''
+marker_tmp=''
+marker_installed=0
+completed=0
+old_hostname=''
+new_hostname=''
+new_username=''
+password=''
+
+log_message() {
+    printf '%s\n' "$*" | systemd-cat --identifier=edbp-oobe || true
+}
+
+clear_tty() {
+    if [[ -t 1 && "${TERM:-dumb}" != dumb ]]; then
+        printf '\033[2J\033[H\033[3J'
+    fi
+}
+
+show_error() {
+    clear_tty
+    whiptail --title "${TITLE}" --msgbox "$1" 10 72 || true
+    clear_tty
+}
+
+fatal() {
+    log_message "ERROR: $1"
+    if command -v whiptail >/dev/null 2>&1 && [[ -t 0 ]]; then
+        show_error "$1"
+    else
+        printf 'ERROR: %s\n' "$1" >&2
+    fi
+    exit 1
+}
+
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    set +e
+
+    password=''
+
+    if (( completed == 0 )); then
+        if (( marker_installed == 1 )); then
+            rm -f -- "${MARKER}"
+        fi
+
+        if [[ -d "${TRANSACTION}" && ! -L "${TRANSACTION}" ]]; then
+            if ! rollback_transaction; then
+                log_message "ERROR: automatic rollback failed; retained ${TRANSACTION} for recovery."
+            fi
+        fi
+    fi
+
+    if [[ -n "${marker_tmp}" ]]; then
+        rm -f -- "${marker_tmp}"
+    fi
+
+    if [[ -n "${work_dir}" && "${work_dir}" != "${TRANSACTION}" ]]; then
+        rm -f -- \
+            "${work_dir}/hostname" \
+            "${work_dir}/hosts" \
+            "${work_dir}/hostname.new" \
+            "${work_dir}/hosts.new" \
+            "${work_dir}/username"
+        rmdir -- "${work_dir}" >/dev/null 2>&1 || true
+    fi
+
+    exit "${rc}"
+}
+
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+remove_transaction_files() {
+    rm -f -- \
+        "${TRANSACTION}/hostname" \
+        "${TRANSACTION}/hosts" \
+        "${TRANSACTION}/hostname.new" \
+        "${TRANSACTION}/hosts.new" \
+        "${TRANSACTION}/username"
+    rmdir -- "${TRANSACTION}"
+}
+
+rollback_transaction() {
+    local transaction_user transaction_home restored_hostname
+
+    [[ -d "${TRANSACTION}" && ! -L "${TRANSACTION}" ]] || return 1
+    [[ "$(stat -c '%u:%g:%a' "${TRANSACTION}")" == '0:0:700' ]] || return 1
+
+    for state_file in hostname hosts username; do
+        [[ -f "${TRANSACTION}/${state_file}" \
+            && ! -L "${TRANSACTION}/${state_file}" ]] || return 1
+    done
+
+    transaction_user=$(<"${TRANSACTION}/username")
+    validate_username_syntax "${transaction_user}" || return 1
+
+    restored_hostname=$(<"${TRANSACTION}/hostname")
+    [[ -n "${restored_hostname}" ]] || return 1
+
+    log_message 'Recovering an interrupted OOBE transaction.'
+    cp -a -- "${TRANSACTION}/hostname" /etc/hostname || return 1
+    cp -a -- "${TRANSACTION}/hosts" /etc/hosts || return 1
+    hostnamectl hostname "${restored_hostname}" >/dev/null 2>&1 || return 1
+
+    if getent passwd "${transaction_user}" >/dev/null 2>&1; then
+        transaction_home=$(getent passwd "${transaction_user}" | awk -F: '{print $6}')
+        [[ "${transaction_home}" == "/home/${transaction_user}" ]] || return 1
+        userdel --remove "${transaction_user}" >/dev/null 2>&1 || true
+        getent passwd "${transaction_user}" >/dev/null 2>&1 && return 1
+    fi
+
+    if getent group "${transaction_user}" >/dev/null 2>&1; then
+        groupdel "${transaction_user}" >/dev/null 2>&1 || return 1
+    fi
+
+    remove_transaction_files || return 1
+    sync
+
+    work_dir=''
+    return 0
+}
+
+validate_hostname() {
+    local candidate=$1
+    (( ${#candidate} >= 1 )) || return 1
+    (( ${#candidate} <= 63 )) || return 1
+    [[ "${candidate}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+validate_username_syntax() {
+    local candidate=$1
+    (( ${#candidate} >= 1 && ${#candidate} <= 32 )) || return 1
+    [[ "${candidate}" =~ ^[a-z][a-z0-9_-]*$ ]] \
+        || return 1
+    [[ "${candidate}" != "${ADMIN_USER}" ]]
+}
+
+validate_username() {
+    local candidate=$1
+    validate_username_syntax "${candidate}" || return 1
+    getent passwd "${candidate}" >/dev/null 2>&1 && return 1
+    getent group "${candidate}" >/dev/null 2>&1 && return 1
+    return 0
+}
+
+render_hosts() {
+    local hostname=$1
+
+    awk -v hostname="${hostname}" '
+        BEGIN { replaced = 0 }
+        /^[[:space:]]*127[.]0[.]1[.]1([[:space:]]|$)/ {
+            if (!replaced) {
+                print "127.0.1.1\t" hostname
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                print "127.0.1.1\t" hostname
+            }
+        }
+    '
+}
+
+prompt_hostname() {
+    local candidate
+
+    while :; do
+        clear_tty
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --inputbox \
+            'Enter a host name (1-63 lowercase letters, digits, or internal hyphens; example: workstation-01):' \
+            11 72 "${old_hostname}" \
+            3>&1 1>&2 2>&3)
+
+        if validate_hostname "${candidate}"; then
+            new_hostname=${candidate}
+            return
+        fi
+
+        show_error 'Invalid host name. Use 1-63 lowercase ASCII letters, digits, or internal hyphens; do not start or end with a hyphen (example: workstation-01).'
+    done
+}
+
+prompt_username() {
+    local candidate
+
+    while :; do
+        clear_tty
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --inputbox \
+            'Enter the daily standard-user name (1-32 lowercase letters, digits, underscores, or hyphens; start with a letter). This account will not receive sudo privileges:' \
+            12 72 \
+            3>&1 1>&2 2>&3)
+
+        if validate_username "${candidate}"; then
+            new_username=${candidate}
+            return
+        fi
+
+        show_error 'Invalid or already-used name. Use 1-32 lowercase ASCII letters, digits, underscores, or hyphens, start with a letter, and choose a name other than edbpadmin.'
+    done
+}
+
+prompt_password() {
+    local candidate confirmation
+
+    while :; do
+        clear_tty
+        candidate=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --passwordbox \
+            'Enter a password of at least 12 characters for the standard user:' \
+            11 72 \
+            3>&1 1>&2 2>&3)
+
+        if (( ${#candidate} < 12 || ${#candidate} > 128 )); then
+            show_error 'The password must contain between 12 and 128 characters.'
+            continue
+        fi
+
+        if [[ "${candidate}" == *:* ]]; then
+            show_error 'The colon character is not accepted by this provisioning workflow.'
+            continue
+        fi
+
+        if [[ "${candidate}" == "${new_username}" ]]; then
+            show_error 'The password must not equal the user name.'
+            continue
+        fi
+
+        clear_tty
+        confirmation=$(whiptail \
+            --title "${TITLE}" \
+            --nocancel \
+            --passwordbox \
+            'Re-enter the password:' \
+            10 72 \
+            3>&1 1>&2 2>&3)
+
+        if [[ "${candidate}" == "${confirmation}" ]]; then
+            password=${candidate}
+            return
+        fi
+
+        candidate=''
+        confirmation=''
+        show_error 'The two passwords did not match.'
+    done
+}
+
+if (( EUID != 0 )); then
+    fatal 'This program must run as root.'
+fi
+
+# The unit has matching conditions, but the script also protects manual runs.
+[[ -e /run/live/medium ]] && exit 0
+[[ -e "${MARKER}" ]] && exit 0
+
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+for required_command in \
+    awk chmod chpasswd cp date getent groupdel hostnamectl id install mktemp mv \
+    rm rmdir stat sync systemctl systemd-cat useradd userdel whiptail; do
+    command -v "${required_command}" >/dev/null 2>&1 \
+        || fatal "Required command is missing: ${required_command}"
+done
+
+[[ -f /etc/hostname && ! -L /etc/hostname ]] \
+    || fatal '/etc/hostname must be an existing regular file.'
+[[ -f /etc/hosts && ! -L /etc/hosts ]] \
+    || fatal '/etc/hosts must be an existing regular file.'
+[[ -f /etc/sudoers.d/edbpadmin ]] \
+    || fatal 'The edbpadmin sudo policy is missing. Repair the installation before continuing.'
+
+id "${ADMIN_USER}" >/dev/null 2>&1 \
+    || fatal 'The installer did not create edbpadmin. OOBE stopped to avoid an unmanaged workstation.'
+
+if [[ " $(id -nG "${ADMIN_USER}") " != *' sudo '* ]]; then
+    fatal 'edbpadmin is not a member of sudo. This also prevents the approved USBGuard IPC delegation.'
+fi
+
+scanner_group_entry=$(getent group "${SCANNER_GROUP}") \
+    || fatal 'The scanner device-access group is missing.'
+scanner_gid=$(awk -F: '{print $3}' <<<"${scanner_group_entry}")
+[[ "${scanner_gid}" =~ ^[0-9]+$ ]] \
+    || fatal 'The scanner group has an invalid numeric GID.'
+
+install -d -o root -g root -m 0755 "${STATE_ROOT}"
+if [[ -e "${TRANSACTION}" || -L "${TRANSACTION}" ]]; then
+    rollback_transaction \
+        || fatal "Interrupted OOBE state could not be recovered safely: ${TRANSACTION}"
+fi
+
+old_hostname=$(< /etc/hostname)
+[[ -n "${old_hostname}" ]] || fatal '/etc/hostname is empty.'
+
+while :; do
+    prompt_hostname
+    prompt_username
+    prompt_password
+
+    if whiptail \
+        --title "${TITLE}" \
+        --yes-button Create \
+        --no-button Back \
+        --yesno \
+        "Host name: ${new_hostname}\nStandard user: ${new_username}\n\nCreate this unprivileged account and finish setup?" \
+        13 72; then
+        break
+    fi
+
+    password=''
+done
+
+work_dir=$(mktemp -d "${STATE_ROOT}/.oobe-transaction.XXXXXX")
+chmod 0700 "${work_dir}"
+cp -a -- /etc/hostname "${work_dir}/hostname"
+cp -a -- /etc/hosts "${work_dir}/hosts"
+
+printf '%s\n' "${new_hostname}" >"${work_dir}/hostname.new"
+render_hosts "${new_hostname}" </etc/hosts >"${work_dir}/hosts.new"
+printf '%s\n' "${new_username}" >"${work_dir}/username"
+chmod 0600 "${work_dir}/username"
+
+# Publish a complete rollback journal atomically before the first mutation.
+# If power is lost after this point, the next OOBE start restores the old
+# hostname and removes only the account named in this root-owned journal.
+sync -f "${work_dir}"
+mv -- "${work_dir}" "${TRANSACTION}"
+work_dir=${TRANSACTION}
+sync -f "${STATE_ROOT}"
+
+useradd \
+    --create-home \
+    --user-group \
+    --groups "${SCANNER_GROUP}" \
+    --shell /bin/bash \
+    --comment '' \
+    "${new_username}"
+
+printf '%s:%s\n' "${new_username}" "${password}" | chpasswd
+password=''
+
+# The only supplementary group is scanner, required by Debian's libsane udev
+# ACL. In particular, the account must not gain sudo, lpadmin, or plugdev.
+primary_gid=$(id -g "${new_username}")
+read -r -a account_gids <<<"$(id -G "${new_username}")"
+scanner_group_found=0
+for account_gid in "${account_gids[@]}"; do
+    if [[ "${account_gid}" == "${primary_gid}" ]]; then
+        continue
+    fi
+    if [[ "${account_gid}" == "${scanner_gid}" ]]; then
+        scanner_group_found=1
+        continue
+    fi
+    fatal 'The standard account unexpectedly received an unauthorized supplementary group.'
+done
+(( scanner_group_found == 1 )) \
+    || fatal 'The standard account did not receive scanner device access.'
+
+install -o root -g root -m 0644 "${work_dir}/hostname.new" /etc/hostname
+install -o root -g root -m 0644 "${work_dir}/hosts.new" /etc/hosts
+hostnamectl hostname "${new_hostname}"
+
+# Make the account and hostname state durable before committing the marker.
+sync
+
+marker_tmp=$(mktemp "${STATE_ROOT}/.oobe-complete.XXXXXX")
+{
+    printf 'EDBP_OOBE_VERSION=1\n'
+    printf 'COMPLETED_AT=%s\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+} >"${marker_tmp}"
+chmod 0644 "${marker_tmp}"
+
+# Ignore catchable termination signals only across the marker rename/fsync
+# commit window. SIGKILL cannot run cleanup, but the already durable account and
+# hostname plus the atomic marker still describe a complete transaction.
+trap '' HUP INT TERM
+mv -- "${marker_tmp}" "${MARKER}"
+marker_tmp=''
+marker_installed=1
+if ! sync -f "${STATE_ROOT}"; then
+    trap 'exit 1' HUP INT TERM
+    fatal 'The OOBE completion marker could not be synchronized to disk.'
+fi
+completed=1
+trap 'exit 1' HUP INT TERM
+
+# Disabling removes the normal boot enablement. The completion marker is the
+# authoritative guard because sddm.service also pulls this unit as a dependency.
+systemctl disable edbp-oobe.service >/dev/null 2>&1 \
+    || log_message 'WARNING: completion marker written, but disabling edbp-oobe.service failed.'
+
+if remove_transaction_files; then
+    work_dir=''
+    sync -f "${STATE_ROOT}" \
+        || log_message 'WARNING: OOBE transaction cleanup was not synchronized.'
+else
+    log_message "WARNING: completed OOBE transaction remains at ${TRANSACTION}."
+fi
+
+log_message "Provisioning completed for host ${new_hostname}; standard account ${new_username} created."
+whiptail \
+    --title "${TITLE}" \
+    --msgbox \
+    'Setup completed successfully. The graphical sign-in screen will start now.' \
+    10 72 || true

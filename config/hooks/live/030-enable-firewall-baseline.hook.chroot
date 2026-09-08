@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -eu
+
+# Debian installs nftables.service disabled by default. EDBP ships a generic
+# workstation firewall baseline, so an installed rules file without this
+# enablement is a security policy failure.
+systemctl enable nftables.service
+systemctl enable usbguard.service

@@ -1,0 +1,66 @@
+### EDBP Debian Installer partial preseed template
+### scripts/stage-edbpadmin-password renders this file as /preseed.cfg.
+
+# Apply only the reviewed defaults below. Unseeded partitioning questions stay
+# interactive. The password token is replaced atomically at build time.
+d-i auto-install/cloak_initrd_preseed boolean true
+
+### Locale, keyboard, and clock
+d-i debian-installer/language string en
+d-i debian-installer/country string US
+d-i debian-installer/locale string en_US.UTF-8
+d-i localechooser/supported-locales multiselect en_US.UTF-8, ar_SY.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+d-i clock-setup/utc boolean true
+d-i clock-setup/ntp boolean false
+d-i time/zone string Etc/UTC
+
+### Offline installer network policy
+# EDBP installs the complete reviewed Live filesystem from the ISO. Running
+# netcfg adds no installation dependency and is unsafe on recent Intel WLAN
+# hardware where the legacy scanner can crash iwlwifi firmware. NetworkManager
+# configures Ethernet/WLAN only after the installed system boots.
+d-i netcfg/enable boolean false
+
+### Identity
+# The token below MUST occur exactly once and MUST never reach an ISO. The
+# renderer accepts only a mode-0600, non-symlink yescrypt or SHA-512-crypt
+# source file and writes the generated preseed with mode 0600.
+d-i passwd/root-login boolean false
+d-i passwd/make-user boolean true
+d-i passwd/user-fullname string EDBP Administrator
+d-i passwd/username string edbpadmin
+d-i passwd/user-password-crypted password @@EDBP_ADMIN_PASSWORD_HASH@@
+d-i passwd/user-default-groups string sudo
+d-i user-setup/allow-password-weak boolean false
+
+### Package source policy
+# The installation must succeed from the ISO without external APT traffic.
+# The Live filesystem already contains the complete target.  The ISO is not a
+# Debian package disc and must never be retained as an apt-cdrom source.  An
+# empty services selection prevents security, updates, and backports generators
+# from depending on a network mirror that is intentionally absent.
+d-i apt-setup/use_mirror boolean false
+d-i apt-setup/services-select multiselect
+# The EDBP media-policy generator creates no cdrom entry and removes Debian's
+# now-redundant finish hook, so disable-cdrom-entries is intentionally unset.
+
+### Partitioning safety and UEFI
+# Only the preferred label is seeded. Deliberately absent:
+#   partman-auto/disk
+#   partman-auto/method
+#   partman/choose_partition
+#   partman/confirm
+#   partman/confirm_nooverwrite
+# Their absence preserves disk selection, recipe selection, and the final
+# destructive confirmation as interactive installer steps.
+d-i partman-partitioning/choose_label select gpt
+d-i partman-partitioning/default_label string gpt
+d-i partman/early_command string /bin/sh /edbp-partman-policy
+
+### Boot loader
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean false
+
+### Target finalization
+d-i preseed/late_command string /bin/sh /edbp-late-command

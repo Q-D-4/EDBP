@@ -1,0 +1,43 @@
+# Print service, LAN discovery, policy helper, and KDE management UI.
+cups
+cups-client
+cups-filters
+cups-browsed
+cups-pk-helper
+avahi-daemon
+libnss-mdns
+ipp-usb
+print-manager
+system-config-printer-udev
+
+# printer-driver-all contains only Recommends. Since Recommends are disabled,
+# its Debian 13 driver set is expanded explicitly to keep the image complete
+# and deterministic.
+printer-driver-all
+printer-driver-brlaser
+printer-driver-c2050
+printer-driver-c2esp
+printer-driver-cjet
+printer-driver-dymo
+printer-driver-escpr
+printer-driver-foo2zjs
+printer-driver-fujixerox
+printer-driver-gutenprint
+printer-driver-hpcups
+printer-driver-indexbraille
+printer-driver-m2300w
+printer-driver-min12xxw
+printer-driver-oki
+printer-driver-pnm2ppa
+printer-driver-postscript-hp
+printer-driver-ptouch
+printer-driver-pxljr
+printer-driver-sag-gdi
+printer-driver-splix
+
+# HP GUI and local/network scanner support.
+hplip
+hplip-gui
+sane-utils
+sane-airscan
+simple-scan

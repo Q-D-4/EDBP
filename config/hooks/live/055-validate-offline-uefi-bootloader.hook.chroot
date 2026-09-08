@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -eu
+
+# These packages are the boot-critical members of the Trixie amd64 UEFI
+# closure.  apt-get simulation below validates their remaining dependencies
+# from Debian metadata instead of duplicating that dependency graph here.
+for package in \
+    grub-efi-amd64 \
+    grub-efi-amd64-bin \
+    grub-common \
+    grub2-common \
+    grub-efi-amd64-signed \
+    shim-signed \
+    mokutil \
+    efibootmgr; do
+    status=$(dpkg-query -W -f='${db:Status-Status}' "${package}" 2>/dev/null || true)
+    if [ "${status}" != installed ]; then
+        printf 'ERROR: offline UEFI bootloader package is not installed: %s\n' \
+            "${package}" >&2
+        exit 1
+    fi
+done
+
+if dpkg-query -W -f='${db:Status-Status}\n' grub-pc 2>/dev/null \
+    | grep -Fqx installed; then
+    printf '%s\n' 'ERROR: BIOS-only grub-pc must not be installed' >&2
+    exit 1
+fi
+
+simulation=$(mktemp /tmp/edbp-uefi-closure.XXXXXX)
+trap 'rm -f -- "${simulation}"' 0
+
+if ! apt-get --simulate --no-install-recommends install \
+    grub-efi-amd64 \
+    grub-efi-amd64-signed \
+    shim-signed \
+    efibootmgr >"${simulation}" 2>&1; then
+    printf '%s\n' 'ERROR: Debian metadata cannot satisfy the offline UEFI closure' >&2
+    sed -n '1,120p' "${simulation}" >&2
+    exit 1
+fi
+
+if grep -Eq '^(Inst|Remv)[[:space:]]' "${simulation}"; then
+    printf '%s\n' 'ERROR: offline UEFI closure would change the Live chroot' >&2
+    grep -E '^(Inst|Remv)[[:space:]]' "${simulation}" >&2
+    exit 1
+fi

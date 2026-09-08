@@ -1,0 +1,7 @@
+# Package selected by Debian grub-installer for amd64 UEFI targets.
+grub-efi-amd64
+
+# Explicit because the project disables APT Recommends globally.
+efibootmgr
+grub-efi-amd64-signed
+shim-signed

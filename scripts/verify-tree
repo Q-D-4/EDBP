@@ -1,0 +1,605 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # Literal crypt(3) dollar markers are intentional.
+
+set -Eeuo pipefail
+
+PROJECT_ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${PROJECT_ROOT}"
+
+fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 \
+        || fail "required build-host command is missing: $1"
+}
+
+for command_name in \
+    awk \
+    bash \
+    debconf-set-selections \
+    git \
+    jq \
+    lb \
+    python3 \
+    sha256sum \
+    shellcheck \
+    stat \
+    ssh-keygen; do
+    require_command "${command_name}"
+done
+
+# Debian installs visudo in /usr/sbin.  Normal unprivileged login shells may
+# legitimately omit sbin directories from PATH, so resolve the canonical path
+# explicitly instead of requiring operators to mutate their environment.
+if command -v visudo >/dev/null 2>&1; then
+    visudo_command=$(command -v visudo)
+elif [[ -x /usr/sbin/visudo ]]; then
+    visudo_command=/usr/sbin/visudo
+else
+    fail 'required build-host command is missing: /usr/sbin/visudo (package: sudo)'
+fi
+
+version=$(sed -n '1{s/[[:space:]]*$//;p;}' VERSION)
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || fail 'VERSION must be a semantic numeric version'
+
+if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
+    && [[ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]]; then
+    fail 'source tree is dirty (tracked or untracked); commit reviewed changes and remove build debris before a production build'
+fi
+
+sh -n auto/config
+sh -n config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
+bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
+sh -n config/includes.installer/edbp-late-command
+sh -n config/includes.installer/edbp-partman-policy
+sh -n config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot
+sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-bash-session-history-policy
+bash -n tests/test-finish-install-reboot
+bash -n tests/test-in-target-stdout-policy
+bash -n tests/test-oobe-hostname-policy
+bash -n tests/test-oobe-username-policy
+bash -n tests/test-offline-apt-setup-policy
+bash -n tests/test-offline-uefi-bootloader-policy
+bash -n tests/test-plasma-launcher-default
+bash -n tests/test-plasma-wallpaper-default
+
+for installer_script in \
+    config/includes.installer/edbp-late-command \
+    config/includes.installer/edbp-partman-policy \
+    config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot \
+    config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy; do
+    [[ -x "${installer_script}" ]] \
+        || fail "installer script is not executable: ${installer_script}"
+done
+
+grep -Fqx \
+    'systemd-analyze verify --man=no edbp-oobe.service sddm.service' \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'desktop hook must suppress only unavailable manpage checks during unit verification'
+
+while IFS= read -r script; do
+    sh -n "${script}"
+    [[ -x "${script}" ]] || fail "hook is not executable: ${script}"
+done < <(find config/hooks/live -maxdepth 1 -type f -name '*.hook.chroot' -print | sort)
+
+while IFS= read -r script; do
+    bash -n "${script}"
+    [[ -x "${script}" ]] || fail "script is not executable: ${script}"
+done < <(find scripts -maxdepth 1 -type f -print | sort)
+
+shellcheck -x --severity=style \
+    auto/config \
+    config/hooks/live/*.hook.chroot \
+    config/includes.installer/edbp-late-command \
+    config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot \
+    config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy \
+    config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh \
+    config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe \
+    scripts/stage-admin-keys \
+    scripts/stage-edbpadmin-password \
+    scripts/verify-tree \
+    tests/test-bash-session-history-policy \
+    tests/test-finish-install-reboot \
+    tests/test-in-target-stdout-policy \
+    tests/test-oobe-hostname-policy \
+    tests/test-oobe-username-policy \
+    tests/test-offline-apt-setup-policy \
+    tests/test-offline-uefi-bootloader-policy \
+    tests/test-plasma-launcher-default \
+    tests/test-plasma-wallpaper-default
+
+preseed_template=config/includes.installer/preseed.cfg.in
+preseed_staged=config/includes.installer/preseed.cfg
+
+[[ -f "${preseed_template}" && ! -L "${preseed_template}" ]] \
+    || fail 'tracked preseed template must be a regular non-symlink file'
+
+if git ls-files --error-unmatch "${preseed_staged}" >/dev/null 2>&1; then
+    fail 'generated secret-bearing preseed.cfg must not be tracked'
+fi
+
+if git ls-files --error-unmatch \
+    secrets/edbpadmin_password_hash >/dev/null 2>&1; then
+    fail 'edbpadmin password hash source must not be tracked'
+fi
+
+for ignored_path in \
+    secrets/edbpadmin_password_hash \
+    config/includes.installer/edbpadmin_authorized_keys \
+    "${preseed_staged}" \
+    "edbp-${version}-amd64.build-inputs.json"; do
+    git check-ignore --quiet "${ignored_path}" \
+        || fail "generated/secret path is not protected by .gitignore: ${ignored_path}"
+done
+
+grep -Fqx \
+    'd-i passwd/user-password-crypted password @@EDBP_ADMIN_PASSWORD_HASH@@' \
+    "${preseed_template}" \
+    || fail 'preseed template does not contain the exact password-hash token line'
+
+validation_directory=$(mktemp -d)
+trap 'rm -rf -- "${validation_directory}"' EXIT
+
+admin_keys_file=${EDBP_ADMIN_KEYS_FILE:-secrets/edbpadmin_authorized_keys}
+./scripts/stage-admin-keys \
+    "${admin_keys_file}" \
+    "${validation_directory}/edbpadmin_authorized_keys" >/dev/null
+
+password_hash_file=${EDBP_ADMIN_PASSWORD_HASH_FILE:-secrets/edbpadmin_password_hash}
+allow_test_hash=${EDBP_ALLOW_TEST_PASSWORD_HASH:-0}
+case "${allow_test_hash}" in
+    0|1)
+        ;;
+    *)
+        fail 'EDBP_ALLOW_TEST_PASSWORD_HASH must be either 0 or 1'
+        ;;
+esac
+
+if [[ ! -e "${password_hash_file}" \
+    && ! -L "${password_hash_file}" \
+    && "${allow_test_hash}" == 1 ]]; then
+    password_hash_file=${validation_directory}/synthetic-test-password-hash
+    test_checksum=$(printf '%086d' 0)
+    printf '$6$EDBPtest$%s\n' "${test_checksum}" >"${password_hash_file}"
+    chmod 0600 "${password_hash_file}"
+fi
+
+rendered_preseed=${validation_directory}/preseed.cfg
+./scripts/stage-edbpadmin-password \
+    "${password_hash_file}" \
+    "${preseed_template}" \
+    "${rendered_preseed}" >/dev/null
+
+debconf-set-selections --checkonly "${rendered_preseed}"
+
+for forbidden_question in \
+    'partman-auto/disk' \
+    'partman-auto/method' \
+    'partman/choose_partition' \
+    'passwd/user-password' \
+    'passwd/user-password-again' \
+    'passwd/root-password' \
+    'passwd/root-password-again' \
+    'passwd/root-password-crypted'; do
+    if awk -v question="${forbidden_question}" \
+        '$1 == "d-i" && $2 == question { found = 1 } END { exit !found }' \
+        "${rendered_preseed}"; then
+        fail "unsafe or secret-bearing preseed question found: ${forbidden_question}"
+    fi
+done
+
+if [[ $(awk \
+    '$1 == "d-i" && $2 == "passwd/user-password-crypted" && $3 == "password" { count += 1 } END { print count + 0 }' \
+    "${rendered_preseed}") != 1 ]]; then
+    fail 'rendered preseed must contain exactly one encrypted edbpadmin password record'
+fi
+
+grep -Eq \
+    '^d-i[[:space:]]+passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    "${rendered_preseed}" \
+    || fail 'rendered preseed does not contain an accepted crypt(3) hash'
+
+if grep -Fq '@@EDBP_ADMIN_PASSWORD_HASH@@' "${rendered_preseed}"; then
+    fail 'password-hash token survived preseed rendering'
+fi
+
+if grep -E \
+    '^[[:space:]]*d-i[[:space:]]+partman[^[:space:]]*[[:space:]]+boolean[[:space:]]+true([[:space:]]|$)' \
+    "${rendered_preseed}" >/dev/null; then
+    fail 'partition confirmation must not be pre-answered true'
+fi
+
+grep -Fqx 'd-i passwd/username string edbpadmin' \
+    "${rendered_preseed}" \
+    || fail 'preseed does not create edbpadmin'
+grep -Fqx 'd-i passwd/root-login boolean false' \
+    "${rendered_preseed}" \
+    || fail 'root login is not disabled in preseed'
+grep -Fqx 'd-i preseed/late_command string /bin/sh /edbp-late-command' \
+    "${rendered_preseed}" \
+    || fail 'installer finalization command is missing'
+grep -Fqx 'd-i netcfg/enable boolean false' \
+    "${rendered_preseed}" \
+    || fail 'installer network configuration must be disabled for offline deployment'
+if awk '$1 == "d-i" && $2 ~ /^netcfg\// && $2 != "netcfg/enable" { found = 1 } END { exit !found }' \
+    "${rendered_preseed}"; then
+    fail 'installer contains network questions despite the offline deployment policy'
+fi
+grep -Fqx 'd-i apt-setup/use_mirror boolean false' \
+    "${rendered_preseed}" \
+    || fail 'installer mirror use must be disabled for offline deployment'
+grep -Fqx 'd-i apt-setup/services-select multiselect' \
+    "${rendered_preseed}" \
+    || fail 'installer security, updates, and backports services must be disabled'
+if [[ $(awk \
+    '$1 == "d-i" && $2 == "apt-setup/services-select" { count += 1 } END { print count + 0 }' \
+    "${rendered_preseed}") != 1 ]]; then
+    fail 'installer must contain exactly one empty apt service selection'
+fi
+if awk '$1 == "d-i" && $2 == "apt-setup/disable-cdrom-entries" { found = 1 } END { exit !found }' \
+    "${rendered_preseed}"; then
+    fail 'redundant disable-cdrom-entries preseed can trigger target apt-get update'
+fi
+grep -Fqx 'd-i partman/early_command string /bin/sh /edbp-partman-policy' \
+    "${rendered_preseed}" \
+    || fail 'installer storage policy command is missing'
+
+obsolete_apt_media_override=config/includes.installer/usr/lib/apt-setup/generators/40cdrom
+obsolete_apt_media_hook=config/includes.installer/usr/lib/post-base-installer.d/99edbp-apt-media-policy
+apt_media_policy_generator=config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+temporary_apt_setup_tracer=config/includes.installer/usr/lib/apt-setup/generators/39z-edbp-apt-setup-trace
+
+if [[ -e "${obsolete_apt_media_override}" \
+    || -L "${obsolete_apt_media_override}" ]]; then
+    fail 'obsolete build-time apt-cdrom override must not remain in the installer initrd'
+fi
+if [[ -e "${obsolete_apt_media_hook}" \
+    || -L "${obsolete_apt_media_hook}" ]]; then
+    fail 'obsolete post-base-installer apt media hook must not remain'
+fi
+if [[ -e "${temporary_apt_setup_tracer}" \
+    || -L "${temporary_apt_setup_tracer}" ]]; then
+    fail 'temporary apt-setup tracer must not ship'
+fi
+if grep -R -Fq 'anna-install apt-cdrom-setup' config/includes.installer; then
+    fail 'installer must not depend on anna timing for apt media policy'
+fi
+if grep -R -Eq 'edbp-apt-setup-debug|\.edbp-trace-original' \
+    config/includes.installer; then
+    fail 'temporary apt-setup trace artifacts must not remain'
+fi
+grep -Fqx 'generator_dir=/usr/lib/apt-setup/generators' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy is not scoped to the apt-setup generator directory'
+grep -Fqx 'target="${generator_dir}/40cdrom"' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not target Debian 40cdrom'
+grep -Fqx 'finish_install_hook=/usr/lib/finish-install.d/10apt-cdrom-setup' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not target Debian apt-cdrom finish hook'
+grep -Fq 'rm -f "$finish_install_hook"' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy does not prevent finish-install apt-get update'
+grep -Fqx 'if ! tmp=$(mktemp "${generator_dir}/.40cdrom.edbp.XXXXXX"); then' \
+    "${apt_media_policy_generator}" \
+    || fail 'apt media policy replacement is not created atomically beside 40cdrom'
+grep -Fq 'chown 0:0 "$tmp"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not preserve root ownership'
+grep -Fq 'chmod 0755 "$tmp"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not preserve executable mode'
+grep -Fq 'mv -f "$tmp" "$target"' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom is not installed with an atomic rename'
+grep -Fqx '    exit 10' \
+    "${apt_media_policy_generator}" \
+    || fail 'replacement 40cdrom does not fail closed on invalid invocation'
+if grep -Fq '/target' "${apt_media_policy_generator}"; then
+    fail 'apt media policy must not modify the installed target directly'
+fi
+./tests/test-in-target-stdout-policy
+./tests/test-bash-session-history-policy
+./tests/test-oobe-hostname-policy
+./tests/test-oobe-username-policy
+./tests/test-offline-apt-setup-policy
+./tests/test-offline-uefi-bootloader-policy
+./tests/test-plasma-wallpaper-default
+./tests/test-plasma-launcher-default
+./tests/test-finish-install-reboot
+grep -Fq 'TYPE=linux_raid_member' \
+    config/includes.installer/edbp-partman-policy \
+    || fail 'installer storage policy does not reject existing MD metadata'
+grep -Fqx ': > /var/lib/partman/md' \
+    config/includes.installer/edbp-partman-policy \
+    || fail 'installer storage policy does not suppress unsupported MD probing'
+
+"${visudo_command}" --check --file \
+    config/includes.chroot_after_packages/etc/sudoers.d/edbpadmin >/dev/null
+
+for json_file in \
+    config/includes.chroot_after_packages/etc/brave-origin/policies/managed/policies.json \
+    config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/metadata.json; do
+    jq --exit-status . "${json_file}" >/dev/null
+done
+
+grep -Fqx 'defaultWallpaperTheme=EDBP' \
+    config/includes.chroot_after_packages/etc/xdg/plasmarc \
+    || fail 'Plasma default wallpaper package is not EDBP'
+grep -Fqx 'defaultFileSuffix=.jpg' \
+    config/includes.chroot_after_packages/etc/xdg/plasmarc \
+    || fail 'Plasma wallpaper suffix is not pinned to JPEG'
+
+plasma_defaults_hook=config/hooks/live/045-configure-plasma-defaults.hook.chroot
+grep -Fq \
+    '/usr/share/plasma/look-and-feel/org.kde.breeze.desktop/contents/defaults' \
+    "${plasma_defaults_hook}" \
+    || fail 'Breeze LookAndFeel wallpaper default is not patched at build time'
+grep -Fq \
+    '/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml' \
+    "${plasma_defaults_hook}" \
+    || fail 'Plasma taskmanager launcher default is not patched at build time'
+grep -Fq "sections[0].replace('Image=Next', 'Image=EDBP', 1)" \
+    "${plasma_defaults_hook}" \
+    || fail 'Breeze LookAndFeel does not select EDBP fail-closed'
+grep -Fq \
+    "'preferred://filemanager,preferred://browser'" \
+    "${plasma_defaults_hook}" \
+    || fail 'reviewed Plasma launcher default is incomplete'
+if grep -R -x 'plasma-discover' config/package-lists >/dev/null; then
+    fail 'Discover must not be installed to satisfy an unwanted launcher'
+fi
+
+bash_history_policy=config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
+bash_history_hook=config/hooks/live/046-configure-bash-session-history.hook.chroot
+grep -Fqx '        HISTFILE=/dev/null' "${bash_history_policy}" \
+    || fail 'Bash history is not redirected away from persistent storage'
+grep -Fqx '    HISTSIZE=1000' "${bash_history_policy}" \
+    || fail 'Bash in-memory session history is not enabled'
+grep -Fqx '    readonly HISTFILE' "${bash_history_policy}" \
+    || fail 'user startup files can override the Bash persistence policy'
+grep -Fq '/etc/bash.bashrc' "${bash_history_hook}" \
+    || fail 'ordinary non-login Bash shells are not covered'
+if grep -REn \
+    'HISTSIZE=0|HISTFILESIZE=0|history[[:space:]]+-c|chattr' \
+    "${bash_history_policy}" "${bash_history_hook}" >/dev/null; then
+    fail 'Bash history policy disables memory or uses a filesystem workaround'
+fi
+
+finish_reboot_policy=config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot
+obsolete_finish_handoff=config/includes.installer/usr/lib/finish-install.d/96edbp-live-installer-exit
+[[ ${finish_reboot_policy##*/} == 94z-edbp-enable-normal-reboot ]] \
+    || fail 'normal reboot policy is not placed after upstream 94random-seed'
+[[ ! -e ${obsolete_finish_handoff} && ! -L ${obsolete_finish_handoff} ]] \
+    || fail 'obsolete rc=11 Live handoff remains in production'
+grep -Fqx 'if [ -z "${LIVE_INSTALLER_MODE:-}" ]; then' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy is not limited to nested Live-installer mode'
+grep -Fqx \
+    'reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin live-installer 58 hook 98'
+grep -Fqx \
+    'reviewed_exit_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin its reviewed hook 98 no-op'
+grep -Fqx \
+    'reviewed_reboot_wrapper_sha256=fcaa29de5e1b76947db266501d80ba70dee80cc598a28bae433a64aa2cb713d2' \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin its reviewed systemd wrapper'
+grep -Fqx \
+    "reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'" \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin the observed Trixie BusyBox rebuild'
+grep -Fqx 'systemd_pid=1' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not target the reviewed PID 1'
+grep -Fqx 'systemd_reboot_signal=39' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not pin systemd SIGRTMIN+5 to signal 39'
+grep -Fqx \
+    "    'exec /bin/busybox kill -39 1' >\"\${reboot_replacement}\"; then" \
+    "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not stage the reviewed systemd request'
+[[ $(grep -Fc 'exec /bin/busybox kill -39 1' "${finish_reboot_policy}") -eq 1 ]] \
+    || fail 'normal reboot policy duplicates the final reboot request'
+grep -Fq 'pid1_comm_path=/proc/${systemd_pid}/comm' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not inspect PID 1 through procfs'
+grep -Fq 'if [ "${pid1_comm}" != systemd ]; then' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not require systemd PID 1'
+grep -Fq 'mv -f "${exit_replacement}" "${stock_exit_hook}"' \
+    "${finish_reboot_policy}" \
+    || fail 'hook 98 no-op is not installed atomically'
+grep -Fq 'mv -f "${reboot_replacement}" "${reboot_path}"' \
+    "${finish_reboot_policy}" \
+    || fail 'systemd reboot wrapper is not installed atomically'
+grep -Fq 'mv -f "${exit_backup}" "${stock_exit_hook}"' \
+    "${finish_reboot_policy}" \
+    || fail 'partial compatibility commit cannot roll back hook 98'
+grep -Fqx '    exit 10' "${finish_reboot_policy}" \
+    || fail 'normal reboot policy does not fail closed before teardown'
+finish_hook_order=$(printf '%s\n' \
+    20final-message \
+    94random-seed \
+    "${finish_reboot_policy##*/}" \
+    95umount \
+    97release-dhcp-lease \
+    98exit-installer \
+    99reboot | LC_ALL=C sort | paste -sd, -)
+[[ ${finish_hook_order} == \
+    20final-message,94random-seed,94z-edbp-enable-normal-reboot,95umount,97release-dhcp-lease,98exit-installer,99reboot ]] \
+    || fail 'normal completion and reboot hooks do not have the reviewed order'
+if awk '$1 == "d-i" && $2 == "finish-install/reboot_in_progress" { found = 1 } END { exit !found }' \
+    "${preseed_template}"; then
+    fail 'preseed suppresses Debian final completion note'
+fi
+if grep -REn \
+    '(^|[[:space:];])(exit|return)[[:space:]]+11([[:space:];]|$)' \
+    config/includes.installer/usr/lib/finish-install.d >/dev/null; then
+    fail 'a production finish-install hook requests obsolete rc=11 Live exit'
+fi
+if grep -Ev '^[[:space:]]*#' "${finish_reboot_policy}" \
+    | grep -En \
+        '(^|[[:space:];&|])u?mount([[:space:]]|$)|/target|(^|[[:space:];&|])(stat|mountpoint|apt(-get)?|apt-install|anna-install|dpkg|udpkg|curl|wget|dhclient|udhcpc|poweroff|halt|shutdown|systemctl)([[:space:]]|$)|reboot[[:space:]]+-f' \
+        >/dev/null; then
+    fail 'normal reboot policy performs unrelated target, mount, package, network, or forced reboot work'
+fi
+if grep -Ev '^[[:space:]]*#' "${finish_reboot_policy}" \
+    | grep -En \
+        '(^|[;&|])[[:space:]]*(if[[:space:]]+)?(![[:space:]]+)?(/sbin/)?reboot([[:space:];&|]|$)' \
+        >/dev/null; then
+    fail 'normal reboot policy invokes reboot before Debian teardown'
+fi
+
+grep -Fqx \
+    'Dir::Etc::Trusted "/usr/share/keyrings/debian-archive-keyring.gpg";' \
+    config/archives/00-edbp-trust-scope.conf \
+    || fail 'APT global trust is not scoped to the Debian archive keyring'
+grep -Fqx \
+    'Dir::Etc::TrustedParts "/etc/apt/keyrings";' \
+    config/archives/00-edbp-trust-scope.conf \
+    || fail 'APT trusted-parts scope is not restricted'
+
+for source_list in config/archives/*.list.chroot config/archives/*.list.binary; do
+    grep -Eq '^deb[[:space:]]+\[[^]]*signed-by=' "${source_list}" \
+        || fail "vendor source is missing Signed-By: ${source_list}"
+    if grep -Eqi 'trusted[[:space:]]*=[[:space:]]*yes' "${source_list}"; then
+        fail "vendor source bypasses signature verification: ${source_list}"
+    fi
+done
+
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser.list.chroot \
+    || fail 'Brave build source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/brave-browser.key.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+    config/archives/brave-browser-release.list.binary \
+    || fail 'Brave installed source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.chroot \
+    || fail 'Element build source does not reference the shared live-build key'
+grep -Fqx \
+    'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/element-io.key.gpg] https://packages.element.io/debian/ default main' \
+    config/archives/element-io.list.binary \
+    || fail 'Element installed source does not reference the shared live-build key'
+
+python3 - <<'PY'
+import pathlib
+import xml.etree.ElementTree as ET
+
+path = pathlib.Path(
+    'config/includes.chroot_after_packages/etc/libreoffice/registry/'
+    'edbp-defaults.xcd'
+)
+root = ET.parse(path).getroot()
+if root.tag != '{http://openoffice.org/2001/registry}data':
+    raise SystemExit('ERROR: unexpected LibreOffice registry root')
+PY
+
+printf '%s  %s\n' \
+    c85e85aa3d1783ffaa649ee8dbbc22af7f87192d304602d37e3018226b394788 \
+    config/archives/brave-browser.key \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    c2cb0c6bf269c56158e3c0ae8185cbeee168db5071bef659b97b1a775ebc1955 \
+    config/archives/element-io.key \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    85d3cddb2f5abee964ec4632de0ef0a3197fea950f893b3b74b164a475ff1f7c \
+    config/includes.chroot_after_packages/etc/nftables.conf \
+    | sha256sum --check --strict >/dev/null
+printf '%s  %s\n' \
+    02d0f820a204d627ae742e7c034dcd3c3f4962dd55de9cc78b8a1d92f5069d34 \
+    config/includes.chroot_after_packages/usr/share/wallpapers/EDBP/contents/images/1920x1080.jpg \
+    | sha256sum --check --strict >/dev/null
+
+grep -Fqx 'brave-origin' config/package-lists/applications.list.chroot \
+    || fail 'Brave Origin package is missing'
+grep -Fqx 'Package: brave-origin brave-keyring' \
+    config/archives/brave-browser.pref \
+    || fail 'Brave repository pin does not restrict eligibility to Origin and its keyring'
+if grep -Fqx 'brave-browser' config/package-lists/applications.list.chroot; then
+    fail 'legacy full Brave package remains in the application list'
+fi
+
+for required_runtime_package in \
+    console-setup \
+    kf6-breeze-icon-theme \
+    libpam-kwallet5 \
+    lsof \
+    rtkit \
+    sonnet6-plugins \
+    upower; do
+    if ! grep -R -x "${required_runtime_package}" config/package-lists >/dev/null; then
+        fail "required no-Recommends runtime package is missing: ${required_runtime_package}"
+    fi
+done
+
+debian_sources=config/includes.chroot_after_packages/etc/apt/sources.list.d/debian.sources
+for required_source_record in \
+    'URIs: https://deb.debian.org/debian/' \
+    'Suites: trixie trixie-updates' \
+    'URIs: https://security.debian.org/debian-security/' \
+    'Suites: trixie-security' \
+    'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; do
+    grep -Fqx "${required_source_record}" "${debian_sources}" \
+        || fail "installed Debian APT source is incomplete: ${required_source_record}"
+done
+
+grep -Fq 'hplip_autostart=/etc/xdg/autostart/hplip-systray.desktop' \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'HPLIP tray autostart policy is missing'
+grep -Fq "printf '\\nHidden=true\\n'" \
+    config/hooks/live/040-configure-desktop-identity.hook.chroot \
+    || fail 'HPLIP tray autostart disable is not enforced'
+
+grep -Fqx 'block with-interface one-of { 08:*:* }' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf \
+    || fail 'explicit USB Mass Storage block rule is missing'
+grep -Fqx 'allow with-interface match-all { 03:*:* 06:*:* 07:*:* }' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf \
+    || fail 'USBGuard approved-class allowlist is missing'
+if grep -Eq '^[[:space:]]*allow[[:space:]]*$' \
+    config/includes.chroot_after_packages/etc/usbguard/rules.conf; then
+    fail 'unconditional USBGuard allow rule is forbidden'
+fi
+
+if git grep -nE \
+    'BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED|PRIVATE) PRIVATE KEY' -- .; then
+    fail 'private-key material detected in tracked content'
+fi
+
+if git ls-files --error-unmatch \
+    config/includes.installer/edbpadmin_authorized_keys >/dev/null 2>&1; then
+    fail 'generated edbpadmin authorized_keys must not be tracked'
+fi
+
+if git grep -nE \
+    'passwd/user-password-crypted[[:space:]]+password[[:space:]]+\$(y|6)\$' \
+    -- .; then
+    fail 'an edbpadmin crypt(3) hash is present in tracked content'
+fi
+
+for forbidden_package in \
+    bluez \
+    bluedevil \
+    libspa-0.2-bluetooth \
+    task-kde-desktop \
+    kde-standard; do
+    if grep -R -x "${forbidden_package}" config/package-lists >/dev/null; then
+        fail "forbidden package appears in package lists: ${forbidden_package}"
+    fi
+done
+
+if grep -R -E \
+    '^[[:space:]]*(blacklist|install)[[:space:]]+(usb_storage|uas)([[:space:]]|$)' \
+    config/includes.chroot_after_packages/etc/modprobe.d; then
+    fail 'USB storage is blocked at kernel level instead of delegated to USBGuard'
+fi
+
+printf 'EDBP source verification passed for version %s.\n' "${version}"

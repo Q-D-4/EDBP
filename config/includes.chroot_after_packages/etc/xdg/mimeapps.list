@@ -1,0 +1,13 @@
+[Default Applications]
+application/msword=libreoffice-writer.desktop
+application/vnd.ms-word=libreoffice-writer.desktop
+application/vnd.ms-word.document.macroEnabled.12=libreoffice-writer.desktop
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop
+application/vnd.ms-excel=libreoffice-calc.desktop
+application/msexcel=libreoffice-calc.desktop
+application/vnd.ms-excel.sheet.macroEnabled.12=libreoffice-calc.desktop
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop
+application/vnd.ms-powerpoint=libreoffice-impress.desktop
+application/mspowerpoint=libreoffice-impress.desktop
+application/vnd.ms-powerpoint.presentation.macroEnabled.12=libreoffice-impress.desktop
+application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop

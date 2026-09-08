@@ -1,0 +1,119 @@
+#!/bin/sh
+
+set -u
+
+tag=edbp-apt-media-policy
+generator_dir=/usr/lib/apt-setup/generators
+target="${generator_dir}/40cdrom"
+finish_install_hook=/usr/lib/finish-install.d/10apt-cdrom-setup
+tmp=
+
+log_error() {
+    logger -t "$tag" "ERROR: $*" || :
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked through the EXIT trap.
+cleanup() {
+    if [ -n "$tmp" ]; then
+        rm -f "$tmp" || :
+    fi
+}
+
+fail_closed() {
+    log_error "$*"
+    exit 10
+}
+
+if [ "$#" -ne 1 ]; then
+    fail_closed 'expected one apt-setup output-fragment argument'
+fi
+
+if [ ! -d "$generator_dir" ] || [ -L "$generator_dir" ]; then
+    fail_closed 'apt-setup generator directory is unavailable or unsafe'
+fi
+
+# If apt-cdrom-setup is not the selected apt-mirror-setup provider, there is
+# no media generator to suppress and no later anna phase inside apt-setup can
+# add one.
+if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    logger -t "$tag" '40cdrom is absent; no Live media generator to disable' || :
+    exit 0
+fi
+
+if [ ! -f "$target" ] || [ -L "$target" ] || [ ! -x "$target" ]; then
+    fail_closed 'existing 40cdrom generator is not a safe executable file'
+fi
+
+uid=$(id -u 2>/dev/null) || fail_closed 'cannot determine installer identity'
+if [ "$uid" != 0 ]; then
+    fail_closed 'apt media policy must run as root in Debian Installer'
+fi
+
+# The stock finish hook can independently enable its media-removal path for a
+# Live ISO booted from USB, then update APT in the installed target.  Since EDBP's
+# replacement 40cdrom creates no media source, that hook is both redundant and
+# incompatible with the zero-network installation policy.  It was delivered
+# by the same already-loaded apt-cdrom-setup udeb as 40cdrom, so remove it now.
+if [ -e "$finish_install_hook" ] || [ -L "$finish_install_hook" ]; then
+    if [ ! -f "$finish_install_hook" ] \
+        || [ -L "$finish_install_hook" ] \
+        || [ ! -x "$finish_install_hook" ]; then
+        fail_closed 'apt-cdrom finish hook is not a safe executable file'
+    fi
+    rm -f "$finish_install_hook" \
+        || fail_closed 'cannot disable apt-cdrom finish hook'
+fi
+
+trap cleanup 0
+trap 'exit 10' 1 2 15
+
+if ! tmp=$(mktemp "${generator_dir}/.40cdrom.edbp.XXXXXX"); then
+    fail_closed 'cannot create replacement beside 40cdrom'
+fi
+if [ ! -f "$tmp" ] || [ -L "$tmp" ]; then
+    fail_closed 'replacement temporary file is unsafe'
+fi
+
+if ! cat >"$tmp" <<'EOF'
+#!/bin/sh
+
+set -u
+
+# Debian Live Installer copies the reviewed SquashFS; the hybrid ISO is not an
+# APT package disc.  Emit one harmless comment so apt-setup-verify materializes
+# sources.list.new, without scanning the Live medium or adding a repository.
+if [ "$#" -ne 1 ]; then
+    logger -t edbp-apt-media-policy \
+        'ERROR: replacement 40cdrom expected one output-fragment argument' || :
+    exit 10
+fi
+
+if ! printf '%s\n' \
+    '# EDBP offline Live installation: no installation-time package source.' \
+    >"$1"; then
+    logger -t edbp-apt-media-policy \
+        'ERROR: replacement 40cdrom cannot write its output fragment' || :
+    exit 10
+fi
+
+logger -t edbp-apt-media-policy \
+    'Skipping apt-cdrom scan for Live SquashFS installation' || :
+exit 0
+EOF
+then
+    fail_closed 'cannot write replacement 40cdrom generator'
+fi
+
+chown 0:0 "$tmp" \
+    || fail_closed 'cannot preserve root ownership on replacement 40cdrom'
+chmod 0755 "$tmp" \
+    || fail_closed 'cannot preserve executable mode on replacement 40cdrom'
+mv -f "$tmp" "$target" \
+    || fail_closed 'cannot atomically replace 40cdrom generator'
+
+tmp=
+trap - 0 1 2 15
+
+logger -t "$tag" \
+    'Replaced 40cdrom immediately before apt-setup media processing' || :
+exit 0

@@ -1,0 +1,2 @@
+# Managed by EDBP. Passwordless sudo is deliberately not permitted.
+edbpadmin ALL=(ALL:ALL) ALL
