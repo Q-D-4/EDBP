@@ -1,0 +1,215 @@
+#!/usr/bin/python3
+"""Offline Phase 3 source tests: mocks are NOT network-isolated runtime evidence."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / 'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak'
+STAGER = ROOT / 'scripts/stage-flatpak-offline'
+
+
+def load(path, name):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+flatpak = load(TOOL, 'test_edbp_flatpak_offline')
+stager = load(STAGER, 'test_edbp_flatpak_stage')
+TRUST = {'collection_id': 'org.flathub.Stable',
+         'definition_sha256': 'f' * 64,
+         'primary_fingerprint': 'a' * 40}
+APPS = {'applications': sorted(flatpak.EXPECTED_APPS)}
+
+
+def lock():
+    return {'schema_version': 1, 'architecture': 'x86_64',
+            'origin': 'flathub', 'collection_id': TRUST['collection_id'],
+            'definition_sha256': TRUST['definition_sha256'],
+            'signing_key_fingerprint': TRUST['primary_fingerprint'],
+            'languages': ['ar', 'en'],
+            'deployments': [{'ref': ref, 'commit': 'a' * 64}
+                            for ref in sorted(flatpak.EXPECTED_APPS |
+                                              flatpak.EXPECTED_RUNTIMES)]}
+
+
+class OfflineTests(unittest.TestCase):
+    def check_network_view(self, own='net:[10001]', init='net:[10000]',
+                           interfaces=('lo',), route_data='', route_text=None):
+        header = ('Inter-|   Receive | Transmit\n'
+                  ' face |bytes packets |bytes packets\n')
+        netdev = header + ''.join(f' {name}: 0 0 0\n' for name in interfaces)
+        routes = ('Iface\tDestination\tGateway\n' + route_data
+                  if route_text is None else route_text)
+        contents = {'/proc/net/dev': netdev, '/proc/net/route': routes}
+        namespaces = {'/proc/self/ns/net': own, '/proc/1/ns/net': init}
+        with patch.object(flatpak.os, 'readlink',
+                          side_effect=lambda path: namespaces[path]), \
+             patch.object(flatpak.Path, 'read_text', autospec=True,
+                          side_effect=lambda path, *args, **kwargs: contents[str(path)]):
+            flatpak.verify_network_isolation()
+
+    def test_dedicated_network_namespace_loopback_only_accepted(self):
+        self.check_network_view()
+
+    def test_zero_byte_ipv4_routes_accepted_in_isolated_namespace(self):
+        self.check_network_view(route_text='')
+
+    def test_whitespace_only_ipv4_routes_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'cannot inspect IPv4 routes'):
+            self.check_network_view(route_text='  \n')
+
+    def test_malformed_ipv4_routes_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'cannot inspect IPv4 routes'):
+            self.check_network_view(route_text='bad-header\n')
+
+    def test_unreadable_ipv4_routes_rejected(self):
+        netdev = ('Inter-|   Receive | Transmit\n'
+                  ' face |bytes packets |bytes packets\n'
+                  ' lo: 0 0 0\n')
+        with patch.object(flatpak.os, 'readlink',
+                          side_effect=['net:[10001]', 'net:[10000]']), \
+             patch.object(flatpak.Path, 'read_text', autospec=True,
+                          side_effect=[netdev, OSError('missing procfs')]):
+            with self.assertRaisesRegex(ValueError, 'cannot inspect IPv4 routes'):
+                flatpak.verify_network_isolation()
+
+    def test_host_network_namespace_rejected_even_if_loopback_only(self):
+        with self.assertRaisesRegex(ValueError, 'separate network namespace'):
+            self.check_network_view(own='net:[10000]', init='net:[10000]')
+
+    def test_nonloopback_interface_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'loopback only'):
+            self.check_network_view(interfaces=('lo', 'eth0'))
+
+    def test_route_in_isolated_namespace_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'empty IPv4 routing'):
+            self.check_network_view(route_data='eth0\t00000000\t0100000A\n')
+
+    def test_missing_proc_network_interfaces_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'cannot inspect network interfaces'):
+            self.check_network_view(interfaces=())
+
+    def test_hook_uses_network_namespace_only(self):
+        hook = (ROOT / 'config/hooks/live/070-configure-flatpak.hook.chroot').read_text()
+        self.assertIn('unshare --net -- "$tool" offline-install', hook)
+        self.assertNotIn('unshare --net --mount', hook)
+        self.assertNotIn('mount -t sysfs', hook)
+
+    def test_offline_import_rejects_live_network(self):
+        with patch.object(flatpak, 'verify_network_isolation',
+                          side_effect=ValueError('network namespace required')):
+            with self.assertRaisesRegex(ValueError, 'network namespace required'):
+                flatpak.offline_install(None, Path('/assets'), TRUST, APPS,
+                                        b'', Path('/tmp/nonexistent/.ostree/repo'))
+
+    def test_valid_pinned_deployments(self):
+        self.assertEqual(len(flatpak.validate_offline_lock(lock(), TRUST, APPS)), 12)
+
+    def test_wrong_origin(self):
+        value = lock()
+        value['origin'] = 'bad'
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_collection_identity_drift(self):
+        value = lock()
+        value['collection_id'] = 'org.other'
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_unreviewed_app_rejected(self):
+        value = lock()
+        value['deployments'][0]['ref'] = 'app/org.unreviewed.App/x86_64/stable'
+        with self.assertRaisesRegex(ValueError, 'application catalog'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_unapproved_runtime_rejected(self):
+        value = lock()
+        for row in value['deployments']:
+            if row['ref'].startswith('runtime/'):
+                row['ref'] = 'runtime/org.unreviewed.Platform/x86_64/stable'
+                break
+        with self.assertRaisesRegex(ValueError, 'runtime closure'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_duplicate_ref_rejected(self):
+        value = lock()
+        value['deployments'][1] = dict(value['deployments'][0])
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_bad_commit_rejected(self):
+        value = lock()
+        value['deployments'][1]['commit'] = '0' * 63
+        with self.assertRaisesRegex(ValueError, 'malformed pinned'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_injected_extra_ref_rejected(self):
+        value = lock()
+        value['deployments'].append({'ref': 'app/org.unreviewed.Test/x86_64/stable',
+                                     'commit': 'b' * 64})
+        with self.assertRaisesRegex(ValueError, 'exactly 12'):
+            flatpak.validate_offline_lock(value, TRUST, APPS)
+
+    def test_symlink_lock_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory) / 'source'
+            link = Path(directory) / 'link'
+            real.write_text(json.dumps(lock()))
+            link.symlink_to(real)
+            with self.assertRaisesRegex(ValueError, 'non-symlink'):
+                flatpak.load_offline_lock(link, TRUST, APPS)
+
+    def test_installed_commit_drift_stops_acceptance(self):
+        class Client:
+            pass
+        with patch.object(flatpak, 'check_remote'), patch.object(flatpak, 'snapshot',
+            return_value={'deployments': [{'ref': ref, 'commit': ('b' * 64 if i == 0 else 'a' * 64)}
+                                           for i, ref in enumerate(sorted(flatpak.EXPECTED_APPS | flatpak.EXPECTED_RUNTIMES))]}):
+            with self.assertRaisesRegex(ValueError, 'mismatched'):
+                flatpak.verify_pinned_deployments(Client(), TRUST, APPS,
+                    flatpak.validate_offline_lock(lock(), TRUST, APPS), b'')
+
+    def test_repo_ref_collection_mismatch(self):
+        pinned = flatpak.validate_offline_lock(lock(), TRUST, APPS)
+        output = '\n'.join(f'(org.other, {ref}) {commit}' for ref, commit in pinned.items())
+        output += '\n(org.other, appstream2/x86_64) ' + 'c' * 64 + '\n'
+        with patch.object(flatpak.subprocess, 'run') as run:
+            run.return_value.stdout = output
+            with self.assertRaisesRegex(ValueError, 'collection/ref drift'):
+                flatpak.verify_offline_repo(Path('/staged/.ostree/repo'), pinned, TRUST)
+
+    def test_stager_rejects_foreign_snapshot_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'installed-manifest.json'
+            data = lock()
+            data['scope'] = 'system'
+            data['deployments'][0]['origin'] = 'foreign'
+            for row in data['deployments'][1:]:
+                row['origin'] = 'flathub'
+            manifest.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, 'foreign acquisition origin'):
+                stager.load_snapshot(manifest, TRUST, APPS)
+
+    def test_stager_rejects_symlink_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps(lock()))
+            link = Path(directory) / 'link.json'
+            link.symlink_to(manifest)
+            with self.assertRaisesRegex(ValueError, 'non-symlink'):
+                stager.load_snapshot(link, TRUST, APPS)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

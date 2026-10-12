@@ -1,0 +1,368 @@
+#!/usr/bin/python3
+"""EDBP LAB: prepare a pinned Flatseal bundle and provision only edbpadmin.
+
+The ISO intentionally retains the reviewed 12-ref system baseline.  After
+live-installer creates edbpadmin, this tool imports the pinned Flatseal bundle
+as that user, verifies the deployment, and removes only the system Flatseal
+app.  Does not establish an unbypassable employee application allowlist.
+"""
+
+import argparse
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+ASSETS = Path('/usr/share/edbp/flatpak')
+TOOL = Path('/usr/local/sbin/edbp-flatpak')
+BUNDLE_DIR = Path('/usr/share/edbp/admin-flatpak')
+BUNDLE = BUNDLE_DIR / 'flatseal.flatpak'
+MANIFEST = BUNDLE_DIR / 'manifest.json'
+MARKER = Path('/var/lib/edbp/flatseal-admin-ready')
+LOCK = Path('/run/lock/edbp-flatseal-admin.lock')
+APP = 'com.github.tchx84.Flatseal'
+REF = 'app/com.github.tchx84.Flatseal/x86_64/stable'
+ADMIN = 'edbpadmin'
+ADMIN_HOME = Path('/home/edbpadmin')
+
+
+def require_root():
+    if os.geteuid() != 0:
+        raise ValueError('root is required for target provisioning')
+
+
+def run(args, *, env=None, timeout=300):
+    try:
+        result = subprocess.run(args, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                check=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        # These commands never pass credentials as arguments. Keep failure
+        # details bounded and escaped; journald access is administrator-only.
+        detail = (exc.stderr or exc.stdout or '').strip()[-2048:]
+        raise ValueError(
+            f'{Path(args[0]).name} exit={exc.returncode}: {detail!r}'
+        ) from None
+    return result.stdout.strip()
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def root_owned(path):
+    """Keep production root-ownership checks independent of test fixtures."""
+    return path.stat().st_uid == 0
+
+
+def safe_file(path, *, private=False):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f'unsafe regular file: {path}')
+    if private and (not root_owned(path) or path.stat().st_mode & 0o077):
+        raise ValueError(f'expected root-private file: {path}')
+
+
+def load_importer():
+    safe_file(TOOL)
+    loader = importlib.machinery.SourceFileLoader('edbp_flatpak_scope', str(TOOL))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def load_lock(edbp):
+    trust, apps, fltr = edbp.load_assets(ASSETS)
+    pinned = edbp.load_offline_lock(ASSETS / 'offline-lock.json', trust, apps)
+    if len(pinned) != 12 or REF not in pinned:
+        raise ValueError('expected the original 12 locked refs including Flatseal')
+    return trust, apps, fltr, pinned
+
+
+def system_pins(edbp, trust, apps, fltr, expected, *, require_all):
+    client = edbp.Flatpak(edbp.safe_environment())
+    edbp.check_remote(client, trust, fltr)
+    snapshot = edbp.snapshot(client, trust, apps, require_apps=require_all)
+    installed = {item['ref']: item['commit'] for item in snapshot['deployments']}
+    if installed != expected:
+        raise ValueError('system Flatpak refs/commits do not match expected scope')
+
+
+def bundle_record(edbp, trust, pinned):
+    safe_file(BUNDLE, private=True)
+    safe_file(MANIFEST, private=True)
+    if (BUNDLE_DIR.is_symlink() or not BUNDLE_DIR.is_dir()
+            or not root_owned(BUNDLE_DIR)
+            or BUNDLE_DIR.stat().st_mode & 0o077):
+        raise ValueError('admin bundle directory must be root-private')
+    data = json.loads(MANIFEST.read_text())
+    expected = {'schema_version': 1, 'ref': REF, 'commit': pinned[REF],
+                'definition_sha256': trust['definition_sha256'],
+                'signing_key_fingerprint': trust['primary_fingerprint']}
+    if not isinstance(data, dict) or any(data.get(k) != v for k, v in expected.items()):
+        raise ValueError('Flatseal bundle manifest does not match pinned trust')
+    value = data.get('sha256')
+    if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value):
+        raise ValueError('invalid Flatseal bundle digest')
+    if sha256(BUNDLE) != value:
+        raise ValueError('Flatseal bundle digest mismatch')
+    return value
+
+
+def prepare():
+    require_root()
+    edbp = load_importer()
+    edbp.verify_network_isolation()
+    trust, apps, fltr, pinned = load_lock(edbp)
+    system_pins(edbp, trust, apps, fltr, pinned, require_all=True)
+    if BUNDLE_DIR.exists() or BUNDLE_DIR.is_symlink():
+        raise ValueError('admin bundle destination already exists; refusing overwrite')
+    BUNDLE_DIR.mkdir(mode=0o700, parents=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix='.flatseal-', dir=BUNDLE_DIR) as tmp:
+            staged = Path(tmp) / 'flatseal.flatpak'
+            # Export a self-contained, from-empty bundle. --from-commit
+            # selects the *source* of an incremental OSTree delta, NOT the
+            # commit being exported. Such a delta fails on a clean user repo.
+            # Keep the pin checks before export and after user import.
+            run(['flatpak', 'build-bundle', '--arch=x86_64',
+                 '/var/lib/flatpak/repo', str(staged), APP, 'stable'],
+                env=edbp.safe_environment(), timeout=3600)
+            if staged.is_symlink() or not staged.is_file() or staged.stat().st_size == 0:
+                raise ValueError('Flatseal bundle export failed')
+            checksum = sha256(staged)
+            data = {'schema_version': 1, 'ref': REF, 'commit': pinned[REF],
+                    'definition_sha256': trust['definition_sha256'],
+                    'signing_key_fingerprint': trust['primary_fingerprint'],
+                    'sha256': checksum}
+            os.chmod(staged, 0o600)
+            os.replace(staged, BUNDLE)
+            with MANIFEST.open('x') as stream:
+                json.dump(data, stream, sort_keys=True, indent=2)
+                stream.write('\n')
+            os.chmod(MANIFEST, 0o600)
+        bundle_record(edbp, trust, pinned)
+    except BaseException:
+        # Created an empty destination at entry; never remove other content.
+        if BUNDLE.exists():
+            BUNDLE.unlink()
+        if MANIFEST.exists():
+            MANIFEST.unlink()
+        BUNDLE_DIR.rmdir()
+        raise
+    print('PASS: pinned Flatseal bundle staged for administrator provisioning')
+
+
+def admin_identity():
+    account = pwd.getpwnam(ADMIN)
+    if account.pw_uid == 0 or account.pw_uid < 1000 or account.pw_dir != str(ADMIN_HOME):
+        raise ValueError('invalid administrative identity')
+    if ADMIN_HOME.is_symlink() or not ADMIN_HOME.is_dir():
+        raise ValueError('missing admin home')
+    if ADMIN_HOME.stat().st_uid != account.pw_uid:
+        raise ValueError('admin home owner mismatch')
+    if ADMIN_HOME.stat().st_mode & 0o022:
+        raise ValueError('admin home writable by group/others')
+    return account
+
+
+def user_flatpak(account, *args, network_isolated=False):
+    # A boot-time system unit is not a login session. Supply a short-lived
+    # private session bus; the system bus comes from the booted OS. Preserve
+    # the network namespace on the bundle import path.
+    command = ['runuser', '-u', ADMIN, '--', 'env', '-i',
+               f'HOME={account.pw_dir}', f'USER={ADMIN}', f'LOGNAME={ADMIN}',
+               'PATH=/usr/local/bin:/usr/bin:/bin', 'LANG=C.UTF-8',
+               'LC_ALL=C.UTF-8', 'dbus-run-session', '--', 'flatpak', *args]
+    if network_isolated:
+        command = ['unshare', '--net', '--', *command]
+    return run(command, timeout=1800)
+
+
+class FlatpakRefMissing(ValueError):
+    """The single expected administrator app is not installed."""
+
+
+def user_pins(account, pinned):
+    try:
+        commit = user_flatpak(account, 'info', '--user', '--show-commit', REF)
+    except ValueError as exc:
+        # Only a well-defined Flatpak absence diagnostic permits a retry.
+        if 'not installed' in str(exc).lower():
+            raise FlatpakRefMissing('administrator Flatseal is absent') from None
+        raise
+    if commit != pinned[REF]:
+        raise ValueError('administrator Flatseal commit mismatch')
+    apps = user_flatpak(account, 'list', '--user', '--all', '--app', '--columns=ref')
+    runtime = user_flatpak(account, 'list', '--user', '--all', '--runtime', '--columns=ref')
+    if apps.splitlines() != [f'{APP}/x86_64/stable'] or runtime.strip():
+        raise ValueError('unapproved user Flatpak refs deployed')
+
+
+def verify_installed():
+    require_root()
+    edbp = load_importer()
+    trust, apps, fltr, pinned = load_lock(edbp)
+    bundle_hash = bundle_record(edbp, trust, pinned)
+    account = admin_identity()
+    if not MARKER.is_file() or MARKER.is_symlink() or MARKER.stat().st_uid != 0:
+        raise ValueError('Flatseal admin provisioning completion marker missing')
+    if MARKER.read_text().strip() != bundle_hash:
+        raise ValueError('Flatseal admin provisioning marker mismatch')
+    system_pins(edbp, trust, apps, fltr,
+                {k: v for k, v in pinned.items() if k != REF}, require_all=False)
+    user_pins(account, pinned)
+    if ADMIN_HOME.stat().st_mode & 0o077:
+        raise ValueError('admin home must be private for user Flatseal isolation')
+    print('PASS: 11 system refs and admin-only Flatseal pinned/verified')
+
+
+def verify_staged():
+    """Installer-safe: inspect the protected offline inputs without D-Bus."""
+    require_root()
+    edbp = load_importer()
+    trust, apps, fltr, pinned = load_lock(edbp)
+    bundle_record(edbp, trust, pinned)
+    for binary in ('/usr/bin/dbus-run-session', '/usr/bin/dbus-daemon',
+                   '/usr/bin/flatpak', '/usr/bin/unshare', '/usr/sbin/runuser'):
+        if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+            raise ValueError(f'first-boot dependency missing: {binary}')
+    account = admin_identity()
+    if ADMIN_HOME.stat().st_mode & 0o077:
+        raise ValueError('admin home must be private before first boot')
+    print('PASS: admin Flatseal bundle and target identity verified for first boot')
+
+
+def provision_unlocked():
+    edbp = load_importer()
+    trust, apps, fltr, pinned = load_lock(edbp)
+    bundle_hash = bundle_record(edbp, trust, pinned)
+    if MARKER.exists() or MARKER.is_symlink():
+        verify_installed()
+        return
+
+    account = admin_identity()
+    if ADMIN_HOME.stat().st_mode & 0o077:
+        raise ValueError('administrator home must be mode 0700 before provisioning')
+
+    # Allow recovery after loss of power between system Flatseal removal and
+    # writing the marker. Any other system ref set remains a hard failure.
+    without_flatseal = {k: v for k, v in pinned.items() if k != REF}
+    try:
+        system_pins(edbp, trust, apps, fltr, pinned, require_all=True)
+        system_has_flatseal = True
+    except ValueError:
+        system_pins(edbp, trust, apps, fltr, without_flatseal, require_all=False)
+        system_has_flatseal = False
+
+    try:
+        user_pins(account, pinned)
+        user_installed = True
+    except FlatpakRefMissing:
+        # Missing exact ref can occur after an interrupted OSTree import.
+        user_installed = False
+
+    if not user_installed:
+        if not system_has_flatseal:
+            raise ValueError('Flatseal absent from both system and administrator scope')
+        temp_parent = ADMIN_HOME / '.local'
+        if temp_parent.is_symlink() or (temp_parent.exists() and not temp_parent.is_dir()):
+            raise ValueError('unsafe administrator .local directory')
+        temp_parent.mkdir(mode=0o700, exist_ok=True)
+        if temp_parent.stat().st_uid != account.pw_uid:
+            if any(temp_parent.iterdir()):
+                raise ValueError('unexpected root-owned populated .local')
+            os.chown(temp_parent, account.pw_uid, account.pw_gid)
+        with tempfile.TemporaryDirectory(prefix='.edbp-flatseal-', dir=temp_parent) as tmp:
+            temp = Path(tmp)
+            os.chown(temp, account.pw_uid, account.pw_gid)
+            source = temp / 'flatseal.flatpak'
+            shutil.copyfile(BUNDLE, source)
+            os.chown(source, account.pw_uid, account.pw_gid)
+            os.chmod(source, 0o600)
+            if sha256(source) != bundle_hash:
+                raise ValueError('copied bundle digest mismatch')
+            user_flatpak(account, 'install', '--user', '--bundle', '--no-deps',
+                         '--no-related', '--assumeyes', '--noninteractive',
+                         str(source), network_isolated=True)
+            user_pins(account, pinned)
+
+    if system_has_flatseal:
+        # Do not remove system Flatseal before administrator deployment is
+        # independently verified. No broad uninstall or ref changes.
+        run(['flatpak', 'uninstall', '--system', '--no-related', '--assumeyes',
+             '--noninteractive', REF], env=edbp.safe_environment(), timeout=1800)
+    system_pins(edbp, trust, apps, fltr, without_flatseal, require_all=False)
+    user_pins(account, pinned)
+
+    MARKER.parent.mkdir(mode=0o755, exist_ok=True)
+    if MARKER.exists() or MARKER.is_symlink():
+        raise ValueError('unexpected provisioning marker collision')
+    # Atomic durable marker: interruption cannot leave a truncated success
+    # marker that blocks recovery on the following boot.
+    fd, name = tempfile.mkstemp(prefix='.flatseal-ready-', dir=MARKER.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(bundle_hash + '\n')
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o600)
+            os.fsync(stream.fileno())
+        if MARKER.exists() or MARKER.is_symlink():
+            raise ValueError('unexpected provisioning marker collision')
+        os.replace(name, MARKER)
+        dfd = os.open(MARKER.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    verify_installed()
+    print('PASS: Flatseal installed for edbpadmin only; system app removed')
+
+
+def provision():
+    require_root()
+    # Guard against concurrent manual invocations and unit retries.
+    LOCK.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if LOCK.is_symlink():
+        raise ValueError('unsafe provisioning lock symlink')
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        if os.fstat(fd).st_uid != 0 or os.fstat(fd).st_mode & 0o077:
+            raise ValueError('unsafe provisioning lock permissions')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        provision_unlocked()
+    finally:
+        os.close(fd)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('prepare', 'verify-staged', 'provision', 'verify-installed'))
+    args = parser.parse_args()
+    {'prepare': prepare, 'verify-staged': verify_staged,
+      'provision': provision, 'verify-installed': verify_installed}[args.command]()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, OSError, json.JSONDecodeError,
+            subprocess.SubprocessError) as exc:
+        print(f'ERROR: {type(exc).__name__}: {exc}', file=sys.stderr)
+        sys.exit(1)

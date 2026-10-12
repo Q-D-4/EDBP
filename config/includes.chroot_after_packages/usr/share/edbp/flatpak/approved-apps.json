@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "architecture": "x86_64",
+  "origin": "flathub",
+  "applications": [
+    "app/org.onlyoffice.desktopeditors/x86_64/stable",
+    "app/com.rustdesk.RustDesk/x86_64/stable",
+    "app/com.github.tchx84.Flatseal/x86_64/stable"
+  ]
+}

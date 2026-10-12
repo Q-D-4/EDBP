@@ -1,0 +1,23 @@
+[Unit]
+Description=EDBP first-boot administrator Flatseal provisioning gate
+Requires=dbus.service
+After=local-fs.target dbus.service
+Before=edbp-oobe.service sddm.service display-manager.service
+ConditionPathExists=!/run/live/medium
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/edbp-flatseal-admin provision
+ExecStartPost=/usr/local/sbin/edbp-flatseal-admin verify-installed
+TimeoutStartSec=70min
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LimitCORE=0
+
+[Install]
+WantedBy=graphical.target

@@ -52,6 +52,7 @@ if [[ "${EDBP_ALLOW_DIRTY:-0}" != 1 ]] \
 fi
 
 sh -n auto/config
+./scripts/verify-flatpak
 sh -n config/includes.chroot_after_packages/etc/profile.d/99-edbp-session-history.sh
 bash -n config/includes.chroot_after_packages/usr/local/sbin/edbp-oobe
 sh -n config/includes.installer/edbp-late-command
@@ -78,7 +79,7 @@ for installer_script in \
 done
 
 grep -Fqx \
-    'systemd-analyze verify --man=no edbp-oobe.service sddm.service' \
+    'systemd-analyze verify --man=no --recursive-errors=one edbp-flatseal-provision.service edbp-oobe.service sddm.service' \
     config/hooks/live/040-configure-desktop-identity.hook.chroot \
     || fail 'desktop hook must suppress only unavailable manpage checks during unit verification'
 
@@ -88,7 +89,10 @@ while IFS= read -r script; do
 done < <(find config/hooks/live -maxdepth 1 -type f -name '*.hook.chroot' -print | sort)
 
 while IFS= read -r script; do
-    bash -n "${script}"
+    # The Python stager is syntax-checked by scripts/verify-flatpak.
+    if [[ "${script}" != scripts/stage-flatpak-offline && "${script}" != scripts/prepare-flatpak-build ]]; then
+        bash -n "${script}"
+    fi
     [[ -x "${script}" ]] || fail "script is not executable: ${script}"
 done < <(find scripts -maxdepth 1 -type f -print | sort)
 
@@ -175,7 +179,11 @@ rendered_preseed=${validation_directory}/preseed.cfg
     "${preseed_template}" \
     "${rendered_preseed}" >/dev/null
 
-debconf-set-selections --checkonly "${rendered_preseed}"
+if (( EUID == 0 )); then
+    debconf-set-selections --checkonly "${rendered_preseed}"
+else
+    sudo -- debconf-set-selections --checkonly "${rendered_preseed}"
+fi
 
 for forbidden_question in \
     'partman-auto/disk' \
@@ -303,6 +311,7 @@ grep -Fqx '    exit 10' \
 if grep -Fq '/target' "${apt_media_policy_generator}"; then
     fail 'apt media policy must not modify the installed target directly'
 fi
+PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test_flatseal_firstboot.py
 ./tests/test-in-target-stdout-policy
 ./tests/test-bash-session-history-policy
 ./tests/test-oobe-hostname-policy
@@ -393,7 +402,7 @@ grep -Fqx \
     "${finish_reboot_policy}" \
     || fail 'normal reboot policy does not pin its reviewed systemd wrapper'
 grep -Fqx \
-    "reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'" \
+    "reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b9) multi-call binary.'" \
     "${finish_reboot_policy}" \
     || fail 'normal reboot policy does not pin the observed Trixie BusyBox rebuild'
 grep -Fqx 'systemd_pid=1' "${finish_reboot_policy}" \

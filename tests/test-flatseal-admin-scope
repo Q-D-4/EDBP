@@ -1,0 +1,257 @@
+#!/usr/bin/python3
+"""Phase 5 LAB source tests (mocks, not Flatpak runtime acceptance)."""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / 'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatseal-admin'
+loader = importlib.machinery.SourceFileLoader('edbp_flatseal_admin_test', str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+PIN = 'a' * 64
+TRUST = {'definition_sha256': 'b' * 64, 'primary_fingerprint': 'c' * 40}
+APPS = {'applications': [module.REF]}
+PINNED = {module.REF: PIN, 'runtime/org.gnome.Platform/x86_64/50': 'd' * 64}
+
+
+class ScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.bundle_dir = self.root / 'admin-flatpak'
+        self.bundle = self.bundle_dir / 'flatseal.flatpak'
+        self.manifest = self.bundle_dir / 'manifest.json'
+        self.marker = self.root / 'flatseal-admin-ready'
+        self.home = self.root / 'edbpadmin'
+        self.home.mkdir(mode=0o700)
+        self.patch_values = patch.multiple(module, BUNDLE_DIR=self.bundle_dir,
+                                           BUNDLE=self.bundle, MANIFEST=self.manifest,
+                                           MARKER=self.marker, ADMIN_HOME=self.home)
+        self.patch_values.start()
+        self.addCleanup(self.patch_values.stop)
+        self.account = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(),
+                                             pw_dir=str(self.home))
+        # Production artifacts must be root-owned. The test fixtures are
+        # intentionally owned by the unprivileged test runner. Simulate only
+        # their ownership, preserving the real type/mode/hash checks.
+        real_root_owned = module.root_owned
+        fixture_paths = {self.bundle_dir, self.bundle, self.manifest}
+        self.owner_patch = patch.object(
+            module, 'root_owned',
+            side_effect=lambda path: True if path in fixture_paths else real_root_owned(path))
+        self.owner_patch.start()
+        self.addCleanup(self.owner_patch.stop)
+
+    def make_bundle(self, *, wrong_digest=False):
+        self.bundle_dir.mkdir(mode=0o700)
+        self.bundle.write_bytes(b'flatseal artifact test bytes')
+        self.bundle.chmod(0o600)
+        record = {'schema_version': 1, 'ref': module.REF, 'commit': PIN,
+                  'definition_sha256': TRUST['definition_sha256'],
+                  'signing_key_fingerprint': TRUST['primary_fingerprint'],
+                  'sha256': ('0' * 64 if wrong_digest else module.sha256(self.bundle))}
+        self.manifest.write_text(json.dumps(record))
+        self.manifest.chmod(0o600)
+
+    def test_metadata_digest_checked(self):
+        self.make_bundle()
+        self.assertEqual(module.bundle_record(None, TRUST, PINNED), module.sha256(self.bundle))
+
+    def test_non_root_owned_bundle_rejected(self):
+        self.make_bundle()
+        with patch.object(module, 'root_owned', side_effect=lambda path: path != self.bundle):
+            with self.assertRaisesRegex(ValueError, 'expected root-private file'):
+                module.bundle_record(None, TRUST, PINNED)
+
+    def test_non_root_owned_manifest_rejected(self):
+        self.make_bundle()
+        with patch.object(module, 'root_owned', side_effect=lambda path: path != self.manifest):
+            with self.assertRaisesRegex(ValueError, 'expected root-private file'):
+                module.bundle_record(None, TRUST, PINNED)
+
+    def test_non_root_owned_directory_rejected(self):
+        self.make_bundle()
+        with patch.object(module, 'root_owned', side_effect=lambda path: path != self.bundle_dir):
+            with self.assertRaisesRegex(ValueError, 'admin bundle directory must be root-private'):
+                module.bundle_record(None, TRUST, PINNED)
+
+    def test_tampered_bundle_refused(self):
+        self.make_bundle(wrong_digest=True)
+        with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+            module.bundle_record(None, TRUST, PINNED)
+
+    def test_symlink_bundle_refused(self):
+        self.make_bundle()
+        self.bundle.unlink()
+        outside = self.root / 'outside'
+        outside.write_text('not trusted')
+        self.bundle.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, 'unsafe regular file'):
+            module.bundle_record(None, TRUST, PINNED)
+
+    def test_bundle_directory_not_world_readable(self):
+        self.make_bundle()
+        self.bundle_dir.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'root-private'):
+            module.bundle_record(None, TRUST, PINNED)
+
+    def test_builder_requires_original_system_lock_before_export(self):
+        calls = []
+        def generate(command, **kwargs):
+            calls.append(command)
+            self.assertFalse(any(arg.startswith('--from-commit') for arg in command))
+            self.assertIn('--arch=x86_64', command)
+            Path(command[-3]).write_bytes(b'bundle')
+            return ''
+        edbp = types.SimpleNamespace(safe_environment=lambda: {},
+                                     verify_network_isolation=lambda: None)
+        with patch.object(module, 'require_root'), \
+             patch.object(module, 'load_importer', return_value=edbp), \
+             patch.object(module, 'load_lock', return_value=(TRUST, APPS, b'', PINNED)), \
+             patch.object(module, 'system_pins', side_effect=ValueError('missing system ref')), \
+             patch.object(module, 'run', side_effect=generate):
+            with self.assertRaisesRegex(ValueError, 'missing system ref'):
+                module.prepare()
+        self.assertEqual(calls, [])
+        self.assertFalse(self.bundle_dir.exists())
+
+    def test_builder_rejects_nonisolated_network_before_any_export(self):
+        calls = []
+        edbp = types.SimpleNamespace(safe_environment=lambda: {},
+                                     verify_network_isolation=lambda: (_ for _ in ()).throw(
+                                         ValueError('network isolation unavailable')))
+        with patch.object(module, 'require_root'), \
+             patch.object(module, 'load_importer', return_value=edbp), \
+             patch.object(module, 'load_lock', return_value=(TRUST, APPS, b'', PINNED)), \
+             patch.object(module, 'run', side_effect=lambda *a, **k: calls.append(a)):
+            with self.assertRaisesRegex(ValueError, 'network isolation unavailable'):
+                module.prepare()
+        self.assertEqual(calls, [])
+        self.assertFalse(self.bundle_dir.exists())
+
+    def test_builder_export_creates_root_private_bundle(self):
+        def generate(command, **kwargs):
+            self.assertFalse(any(arg.startswith('--from-commit') for arg in command))
+            self.assertIn('--arch=x86_64', command)
+            self.assertEqual(command[:3], ['flatpak', 'build-bundle', '--arch=x86_64'])
+            self.assertEqual(Path(command[-3]).name, 'flatseal.flatpak')
+            self.assertEqual(Path(command[-3]).parent.parent, self.bundle_dir)
+            self.assertEqual(command[-2:], [module.APP, 'stable'])
+            Path(command[-3]).write_bytes(b'Flatseal locked app test')
+        edbp = types.SimpleNamespace(safe_environment=lambda: {},
+                                     verify_network_isolation=lambda: None)
+        with patch.object(module, 'require_root'), \
+             patch.object(module, 'load_importer', return_value=edbp), \
+             patch.object(module, 'load_lock', return_value=(TRUST, APPS, b'', PINNED)), \
+             patch.object(module, 'system_pins'), \
+             patch.object(module, 'run', side_effect=generate):
+            module.prepare()
+        self.assertEqual(module.bundle_record(None, TRUST, PINNED), module.sha256(self.bundle))
+        self.assertEqual(self.bundle_dir.stat().st_mode & 0o077, 0)
+
+    def test_flatseal_user_scope_commit_and_only_app(self):
+        def cli(account, *args, **kwargs):
+            if 'info' in args:
+                return PIN
+            if '--app' in args:
+                return f'{module.APP}/x86_64/stable'
+            return ''
+        with patch.object(module, 'user_flatpak', side_effect=cli):
+            module.user_pins(self.account, PINNED)
+
+    def test_flatseal_user_scope_foreign_app_rejected(self):
+        def cli(account, *args, **kwargs):
+            if 'info' in args:
+                return PIN
+            if '--app' in args:
+                return f'{module.APP}/x86_64/stable\norg.foreign.App/x86_64/stable'
+            return ''
+        with patch.object(module, 'user_flatpak', side_effect=cli):
+            with self.assertRaisesRegex(ValueError, 'unapproved user Flatpak refs'):
+                module.user_pins(self.account, PINNED)
+
+    def test_install_failure_does_not_uninstall_system_flatseal(self):
+        self.make_bundle()
+        self.home.chmod(0o700)
+        edbp = types.SimpleNamespace(safe_environment=lambda: {},
+                                     verify_network_isolation=lambda: None)
+        with patch.object(module, 'require_root'), \
+             patch.object(module, 'load_importer', return_value=edbp), \
+             patch.object(module, 'load_lock', return_value=(TRUST, APPS, b'', PINNED)), \
+             patch.object(module, 'system_pins'), \
+             patch.object(module, 'admin_identity', return_value=self.account), \
+             patch.object(module, 'user_flatpak', side_effect=ValueError('no user install')), \
+             patch.object(module, 'run') as system_command:
+            with self.assertRaisesRegex(ValueError, 'no user install'):
+                module.provision_unlocked()
+        system_command.assert_not_called()
+        self.assertFalse(self.marker.exists())
+
+    def test_success_installs_user_first_removes_system_second(self):
+        self.make_bundle()
+        self.home.chmod(0o700)
+        sequence = []
+        edbp = types.SimpleNamespace(safe_environment=lambda: {},
+                                     verify_network_isolation=lambda: None)
+        def system_pins(*args, **kwargs):
+            sequence.append(('system-check', module.REF in args[4] if len(args)>4 else None))
+        def install_user(account, *args, **kwargs):
+            sequence.append(('user-install', kwargs.get('network_isolated')))
+        def user_pins(account, pinned):
+            sequence.append(('user-verify', None))
+        def system_run(args, **kwargs):
+            sequence.append(('system-uninstall', '--system' in args))
+        with patch.object(module, 'require_root'), \
+             patch.object(module, 'load_importer', return_value=edbp), \
+             patch.object(module, 'load_lock', return_value=(TRUST, APPS, b'', PINNED)), \
+             patch.object(module, 'system_pins', side_effect=system_pins), \
+             patch.object(module, 'admin_identity', return_value=self.account), \
+             patch.object(module, 'user_flatpak', side_effect=install_user), \
+             patch.object(module, 'user_pins', side_effect=user_pins), \
+             patch.object(module, 'run', side_effect=system_run), \
+             patch.object(module, 'verify_installed'):
+            # The first state query must represent a missing user Flatseal ref.
+            # Otherwise the resumed provisioning path legitimately skips import.
+            _edbp_original_user_pins = module.user_pins
+            _edbp_first_ref_query = [True]
+            def _edbp_user_pins_missing_once(*args, **kwargs):
+                if _edbp_first_ref_query[0]:
+                    _edbp_first_ref_query[0] = False
+                    raise module.FlatpakRefMissing("simulated initially absent user Flatseal ref")
+                return _edbp_original_user_pins(*args, **kwargs)
+            from unittest import mock as _edbp_mock
+            with _edbp_mock.patch.object(module, "user_pins", side_effect=_edbp_user_pins_missing_once):
+                module.provision_unlocked()
+        names = [a for a, _ in sequence]
+        self.assertLess(names.index('user-install'), names.index('user-verify'))
+        self.assertLess(names.index('user-verify'), names.index('system-uninstall'))
+        self.assertEqual(sequence[names.index('user-install')][1], True)
+        self.assertEqual(self.marker.read_text().strip(), module.sha256(self.bundle))
+
+    def test_source_integrates_only_after_existing_checks(self):
+        hook = (ROOT / 'config/hooks/live/070-configure-flatpak.hook.chroot').read_text()
+        self.assertLess(hook.index('"$tool" verify --require-apps'), hook.index('"$policy_tool" apply'))
+        self.assertLess(hook.index('"$policy_tool" verify'), hook.index('unshare --net -- "$flatseal_admin" prepare'))
+        late = (ROOT / 'config/includes.installer/edbp-late-command').read_text()
+        self.assertIn('in-target /usr/local/sbin/edbp-flatseal-admin verify-staged', late)
+        self.assertNotIn('flatpak install --system', late)
+        runner = (ROOT / 'scripts/verify-flatpak').read_text()
+        self.assertIn('python3 tests/test-flatseal-admin-scope', runner)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "architecture": "x86_64",
+  "origin": "flathub",
+  "collection_id": "org.flathub.Stable",
+  "definition_sha256": "3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a",
+  "signing_key_fingerprint": "6E5C05D979C76DAF93C081354184DD4D907A7CAE",
+  "languages": [
+    "ar",
+    "en"
+  ],
+  "deployments": [
+    {
+      "ref": "app/com.github.tchx84.Flatseal/x86_64/stable",
+      "commit": "ef9fe38e9cb96c170ea579fe1bbf8c76011255d4962d7fc4b3aa4e0a6063f8ae"
+    },
+    {
+      "ref": "app/com.rustdesk.RustDesk/x86_64/stable",
+      "commit": "f05e75b9f7a044d5c436eda2ff0cfa186b43adbb097a7d54b025a204ec35db43"
+    },
+    {
+      "ref": "app/org.onlyoffice.desktopeditors/x86_64/stable",
+      "commit": "5806f4728bd3e2bc5314c2c0dfbc59d10dcac33516b5536ac12ceae2e79f98c1"
+    },
+    {
+      "ref": "runtime/com.rustdesk.RustDesk.Locale/x86_64/stable",
+      "commit": "21fc65c0dccb8f38375a0794091d384c54168c86ccec4c0d2db4f7d41ab22269"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08",
+      "commit": "0083f33e9a33c454d0f0850d06581e5f991ecf2dbde02e38079db49e01c7ebac"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra",
+      "commit": "695a049fc6520a9c8041cbdb35df59f9d38b562b02c6316a36fb2deb50a0992b"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform.Locale/x86_64/25.08",
+      "commit": "56249bc390c2b19c7d77a241bba02118854f450db216b23cd84f5df5125ba5a0"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform.VAAPI.Intel/x86_64/25.08",
+      "commit": "83852286ee4f4fe3e5b7c2490ee9eb00a9aa4a9191b02ecc397ca6ea79f8410e"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra",
+      "commit": "7ccd63f7532e93ce345b67dedc492748bba449917e81a031502715bc38e3f438"
+    },
+    {
+      "ref": "runtime/org.freedesktop.Platform/x86_64/25.08",
+      "commit": "d27f7a6a974e40b061070bec1be9e1b52a7a6872b271e6a45c2c34a48bf6fedf"
+    },
+    {
+      "ref": "runtime/org.gnome.Platform.Locale/x86_64/50",
+      "commit": "6683351f7652737f6a58c17b4480e2ac92aa9f03ac8192f0c9bac713b53e097e"
+    },
+    {
+      "ref": "runtime/org.gnome.Platform/x86_64/50",
+      "commit": "0bd5091046708e64bc882e8349877cfbae713f6a1e2d0487a5f10af820a2d792"
+    }
+  ]
+}

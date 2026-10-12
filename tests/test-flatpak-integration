@@ -1,0 +1,282 @@
+#!/usr/bin/python3
+"""Focused negative-path checks; fake Flatpak responses are not runtime evidence."""
+
+import configparser
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / 'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak'
+ASSETS = ROOT / 'config/includes.chroot_after_packages/usr/share/edbp/flatpak'
+loader = importlib.machinery.SourceFileLoader('edbp_flatpak', str(TOOL))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+class FakeFlatpak:
+    version = 'Flatpak 1.16.1'
+
+    def __init__(self, root):
+        self.root = root
+        self.commands = []
+        self.rows = ''
+        self.commit = 'a' * 64
+        self.runtime = 'org.freedesktop.Platform/x86_64/25.08'
+
+    def run(self, command, *args, **kwargs):
+        self.commands.append((command, args))
+        if command == 'list':
+            # Real Flatpak 1.16 prints partial refs without app/runtime here.
+            kind = 'app/' if '--app' in args else 'runtime/'
+            return '\n'.join(line[len(kind):] for line in self.rows.splitlines()
+                             if line.startswith(kind))
+        if command == 'info':
+            return {'--show-commit': self.commit,
+                    '--show-runtime': self.runtime,
+                    '--show-permissions': '[Context]\nshared=network;'}[args[0]]
+        return ''
+
+
+class IntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+        self.assets = self.directory / 'assets'
+        shutil.copytree(ASSETS, self.assets)
+        self.trust = json.loads((self.assets / 'trust.json').read_text())
+        self.apps = json.loads((self.assets / 'approved-apps.json').read_text())
+        self.fingerprint = patch.object(module, 'key_fingerprints',
+                                        return_value=[self.trust['primary_fingerprint']])
+        self.fingerprint.start()
+        self.addCleanup(self.fingerprint.stop)
+        self.addCleanup(self.temporary.cleanup)
+        self.client = FakeFlatpak(self.directory / 'installation')
+        (self.client.root / 'repo').mkdir(parents=True)
+        (self.client.root / 'repo/flathub.trustedkeys.gpg').write_bytes(b'public-key-fixture')
+        self.remote = {
+            'url': self.trust['url'], 'gpg-verify': 'true',
+            'gpg-verify-summary': 'true', 'collection-id': self.trust['collection_id'],
+            'xa.filter': str(self.assets / 'flathub.filter'),
+        }
+        self.write_remote()
+
+    def write_remote(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config['remote "flathub"'] = self.remote
+        with (self.client.root / 'repo/config').open('w') as stream:
+            config.write(stream)
+
+    def test_reviewed_assets(self):
+        module.load_assets(self.assets)
+
+    def test_tampered_definition(self):
+        with (self.assets / 'flathub.flatpakrepo').open('ab') as stream:
+            stream.write(b'\n# tampered')
+        with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+            module.load_assets(self.assets)
+
+    def test_key_checksum_mismatch(self):
+        self.trust['key_sha256'] = '0' * 64
+        (self.assets / 'trust.json').write_text(json.dumps(self.trust))
+        with self.assertRaisesRegex(ValueError, 'key checksum mismatch'):
+            module.load_assets(self.assets)
+
+    def test_signing_key_mismatch(self):
+        module.key_fingerprints.return_value = ['0' * 40]
+        with self.assertRaisesRegex(ValueError, 'signing key mismatch'):
+            module.load_assets(self.assets)
+
+    def test_duplicate_catalog_ref(self):
+        self.apps['applications'][1] = self.apps['applications'][0]
+        (self.assets / 'approved-apps.json').write_text(json.dumps(self.apps))
+        with self.assertRaisesRegex(ValueError, 'catalog mismatch'):
+            module.load_assets(self.assets)
+
+    def test_unapproved_application_filter(self):
+        with (self.assets / 'flathub.filter').open('a') as stream:
+            stream.write('allow app/*\n')
+        with self.assertRaisesRegex(ValueError, 'filter mismatch'):
+            module.load_assets(self.assets)
+
+    def test_symlink_asset(self):
+        source = self.assets / 'flathub.flatpakrepo'
+        source.unlink()
+        source.symlink_to(ASSETS / 'flathub.flatpakrepo')
+        with self.assertRaisesRegex(ValueError, 'non-symlink'):
+            module.load_assets(self.assets)
+
+    def test_existing_remote_url_drift_prevents_mutation(self):
+        self.remote['url'] = 'https://unapproved.example/repo/'
+        self.write_remote()
+        with self.assertRaisesRegex(ValueError, 'URL drift'):
+            module.configure(self.client, self.assets, self.trust,
+                             (self.assets / 'flathub.filter').read_bytes())
+        self.assertEqual(self.client.commands, [])
+
+    def test_existing_collection_drift_prevents_mutation(self):
+        self.remote['collection-id'] = 'org.unapproved.Stable'
+        self.write_remote()
+        with self.assertRaisesRegex(ValueError, 'collection ID drift'):
+            module.configure(self.client, self.assets, self.trust, b'')
+        self.assertEqual(self.client.commands, [])
+
+    def test_unsigned_commits_rejected(self):
+        self.remote['gpg-verify'] = 'false'
+        self.write_remote()
+        with self.assertRaisesRegex(ValueError, 'commit signature'):
+            module.check_remote(self.client, self.trust)
+
+    def test_unsigned_summary_rejected(self):
+        self.remote['gpg-verify-summary'] = 'false'
+        self.write_remote()
+        with self.assertRaisesRegex(ValueError, 'summary signature'):
+            module.check_remote(self.client, self.trust)
+
+    def test_installed_unapproved_key_rejected(self):
+        module.key_fingerprints.return_value = ['0' * 40]
+        with self.assertRaisesRegex(ValueError, 'signing key drift'):
+            module.check_remote(self.client, self.trust)
+
+    def test_installed_filter_drift(self):
+        with self.assertRaisesRegex(ValueError, 'filter mismatch'):
+            module.check_remote(self.client, self.trust, b'allow *\n')
+
+    def test_missing_payload_stops_acceptance(self):
+        with self.assertRaisesRegex(ValueError, 'applications are missing'):
+            module.snapshot(self.client, self.trust, self.apps, True)
+
+    def test_missing_runtime_stops_acceptance(self):
+        self.client.rows = self.apps['applications'][0] + '\tflathub\t9.4.0'
+        with self.assertRaisesRegex(ValueError, 'missing runtime'):
+            module.snapshot(self.client, self.trust, self.apps, False)
+
+    def test_foreign_origin_rejected(self):
+        self.client.rows = self.apps['applications'][0] + '\tunapproved\t9.4.0'
+        with self.assertRaisesRegex(ValueError, 'unapproved'):
+            module.snapshot(self.client, self.trust, self.apps, False)
+
+    def test_foreign_app_rejected(self):
+        self.client.rows = 'app/org.unapproved.App/x86_64/stable\tflathub\t1'
+        with self.assertRaisesRegex(ValueError, 'unapproved system application'):
+            module.snapshot(self.client, self.trust, self.apps, False)
+
+    def test_truncated_commit_rejected(self):
+        self.client.rows = self.apps['applications'][0] + '\tflathub\t9.4.0'
+        self.client.commit = 'abc123'
+        with self.assertRaisesRegex(ValueError, 'OSTree commit'):
+            module.snapshot(self.client, self.trust, self.apps, False)
+
+    def test_complete_snapshot_records_exact_revisions(self):
+        self.client.rows = '\n'.join(ref + '\tflathub\t1.0'
+                                     for ref in self.apps['applications'])
+        self.client.rows += '\nruntime/' + self.client.runtime + '\tflathub\t'
+        value = module.snapshot(self.client, self.trust, self.apps, True)
+        self.assertEqual(len(value['deployments']), 4)
+        self.assertTrue(all(row['commit'] == 'a' * 64 for row in value['deployments']))
+        self.assertIn('not an enforced offline image lock', value['status'])
+        self.assertTrue(all(command[0] in ('list', 'info') for command in self.client.commands))
+
+    def test_staging_never_uses_host_installation(self):
+        with self.assertRaisesRegex(ValueError, 'host system installation'):
+            module.prepare_stage(Path('/var/lib/flatpak'))
+
+    def test_nonempty_unmarked_stage_preserved(self):
+        stage = self.directory / 'stage'
+        stage.mkdir(mode=0o700)
+        sentinel = stage / 'unrelated'
+        sentinel.write_text('keep')
+        with self.assertRaisesRegex(ValueError, 'nonempty unmarked'):
+            module.prepare_stage(stage)
+        self.assertEqual(sentinel.read_text(), 'keep')
+
+    def test_stage_reuse_is_idempotent(self):
+        stage = self.directory / 'stage'
+        module.prepare_stage(stage)
+        marker = (stage / '.edbp-flatpak-stage').read_bytes()
+        module.prepare_stage(stage)
+        self.assertEqual((stage / '.edbp-flatpak-stage').read_bytes(), marker)
+
+    def test_stage_symlink_rejected(self):
+        stage = self.directory / 'stage'
+        stage.symlink_to(self.assets, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink components'):
+            module.prepare_stage(stage)
+
+    def test_external_flatpak_and_loader_environment_not_inherited(self):
+        with patch.dict(os.environ, {'FLATPAK_SYSTEM_DIR': '/var/lib/flatpak',
+                                     'FLATPAK_BWRAP': '/unapproved',
+                                     'LD_PRELOAD': '/unapproved',
+                                     'DBUS_SESSION_BUS_ADDRESS': 'unapproved'}):
+            env = module.safe_environment(self.directory / 'stage')
+        self.assertNotEqual(env['FLATPAK_SYSTEM_DIR'], '/var/lib/flatpak')
+        for name in ('FLATPAK_BWRAP', 'LD_PRELOAD', 'DBUS_SESSION_BUS_ADDRESS'):
+            self.assertNotIn(name, env)
+
+    def test_public_key_inspection_does_not_inherit_loader_environment(self):
+        self.fingerprint.stop()
+        with patch.dict(os.environ, {'LD_PRELOAD': '/unapproved'}), \
+                patch.object(module.subprocess, 'run') as run:
+            run.return_value.stdout = b''
+            self.assertEqual(module.key_fingerprints(b'public-key-fixture'), [])
+        self.assertNotIn('LD_PRELOAD', run.call_args.kwargs['env'])
+
+    def test_nonroot_acquisition_never_contacts_host_system_helper(self):
+        stage = self.directory / 'stage'
+        argv = ['edbp-flatpak', '--assets', str(self.assets), 'acquire-online',
+                '--stage', str(stage)]
+        with patch.object(module.os, 'geteuid', return_value=1000), \
+                patch.object(module.sys, 'argv', argv), \
+                patch.object(module, 'Flatpak') as client:
+            with self.assertRaisesRegex(ValueError, 'acquisition requires'):
+                module.main()
+        client.assert_not_called()
+        self.assertFalse(stage.exists())
+
+    def test_manifest_symlink_preserves_unrelated_file(self):
+        sentinel = self.directory / 'unrelated'
+        sentinel.write_text('keep')
+        destination = self.directory / 'manifest.json'
+        destination.symlink_to(sentinel)
+        with self.assertRaisesRegex(ValueError, 'unsafe manifest destination'):
+            module.write_json(destination, {})
+        self.assertEqual(sentinel.read_text(), 'keep')
+
+    def test_polkit_only_denies_flatpak_system_actions(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node unavailable: actual Polkit rule execution NOT TESTED')
+        rule = ROOT / 'config/includes.chroot_after_packages/etc/polkit-1/rules.d/00-edbp-flatpak-admin.rules'
+        program = r'''
+const fs = require('fs'), vm = require('vm');
+let callback;
+vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {
+  polkit: {addRule: f => {callback = f;}, Result: {NO: 'NO'}}
+});
+for (const id of ['app-install', 'runtime-install', 'app-update', 'runtime-update',
+  'configure-remote', 'configure', 'install-bundle', 'app-uninstall',
+  'runtime-uninstall', 'modify-repo', 'update-remote', 'metadata-update']) {
+  const action = {id: 'org.freedesktop.Flatpak.' + id};
+  for (const user of ['daily-user', 'edbpadmin']) {
+    if (callback(action, {user}) !== 'NO') throw new Error(id + ' allowed');
+  }
+  if (callback(action, {user: 'root'}) !== undefined) throw new Error('root override');
+}
+if (callback({id: 'org.freedesktop.NetworkManager.settings.modify.system'},
+  {user: 'daily-user'}) !== undefined) throw new Error('unrelated action affected');
+'''
+        subprocess.run([node, '-e', program, str(rule)], check=True, timeout=30)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

@@ -49,3 +49,12 @@ id_ed25519.*
 # OS generated files
 .DS_Store
 Thumbs.db
+/config/includes.chroot_after_packages/opt/edbp-build-inputs/
+
+edbp-*.flatpak-lock.json
+
+# Python and live-build generated inventory
+__pycache__/
+*.pyc
+chroot.files
+edbp-*.files

@@ -1,0 +1,7 @@
+# Phase 2 acquisition filter. Phase 3 must constrain runtime refs to the
+# verified dependency closure. This is not enforcement of per-user installs.
+deny *
+allow app/org.onlyoffice.desktopeditors/x86_64/stable
+allow app/com.rustdesk.RustDesk/x86_64/stable
+allow app/com.github.tchx84.Flatseal/x86_64/stable
+allow runtime/*/x86_64/*

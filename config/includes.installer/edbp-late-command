@@ -42,6 +42,10 @@ in-target id "${ADMIN_USER}" >/dev/null 2>&1 \
     || fail 'Debian Installer did not create edbpadmin'
 
 in-target usermod -aG sudo "${ADMIN_USER}"
+# Admin-only user Flatpak installation requires a private administrator home.
+# Do not rely on Debian Installer's default home-directory mode.
+in-target chmod 0700 "/home/${ADMIN_USER}" \
+    || fail "cannot make administrator home private"
 
 admin_home=$(in-target --pass-stdout getent passwd "${ADMIN_USER}" | awk -F: '{print $6}')
 [ "${admin_home}" = "/home/${ADMIN_USER}" ] \
@@ -80,10 +84,18 @@ for unit in \
     ssh.service \
     nftables.service \
     usbguard.service \
+    edbp-flatseal-provision.service \
     edbp-oobe.service; do
     in-target systemctl enable "${unit}" >/dev/null \
         || fail "could not enable ${unit}"
 done
+
+# Do not attempt Flatpak user installation inside the installer's chroot:
+# the target system/session D-Bus services do not run there. Validate the
+# pinned offline bundle and admin identity; first-boot systemd gate performs
+# the actual install before OOBE and SDDM can become available.
+in-target /usr/local/sbin/edbp-flatseal-admin verify-staged \
+    || fail 'administrator Flatseal offline staging verification failed'
 
 sync
 logger -t edbp-installer 'Target identity and service finalization completed' \

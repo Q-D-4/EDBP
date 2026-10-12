@@ -1,0 +1,191 @@
+#!/usr/bin/python3
+"""Source-only behavioral checks; not a substitute for online or ISO acceptance."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+import sys
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / 'scripts/prepare-flatpak-build'
+loader = importlib.machinery.SourceFileLoader('fresh_under_test', str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+class FreshTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name) / 'repo'
+        self.root.mkdir()
+        self.dest = self.root / 'config/includes.chroot_after_packages/opt/edbp-build-inputs'
+        self.patchers = [patch.object(module, 'ROOT', self.root),
+                         patch.object(module, 'DEST', self.dest),
+                         patch.object(module, 'MARKER', self.dest / '.edbp-fresh-build'),
+                         patch.object(module.os, 'geteuid', return_value=0)]
+        for p in self.patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_prev_chroot_blocks_even_when_payload_absent(self):
+        (self.root / 'chroot').mkdir()
+        with self.assertRaisesRegex(ValueError, 'previous live-build state'):
+            module.assert_build_tree_ready()
+
+    def test_prev_binary_blocks(self):
+        (self.root / 'binary').mkdir()
+        with self.assertRaisesRegex(ValueError, 'previous live-build state'):
+            module.assert_build_tree_ready()
+
+    def test_unmanaged_payload_protected(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / 'flatpak-sideload').mkdir()
+        sentinel = self.dest / 'flatpak-sideload' / 'keep'
+        sentinel.write_text('original')
+        with self.assertRaisesRegex(ValueError, 'unmanaged Flatpak'):
+            module.assert_build_tree_ready()
+        self.assertEqual(sentinel.read_text(), 'original')
+
+    def test_symlink_in_parent_rejected(self):
+        self.dest.parent.mkdir(parents=True)
+        self.dest.symlink_to(self.root)
+        with self.assertRaisesRegex(ValueError, 'unsafe build input parent symlink'):
+            module.assert_build_tree_ready()
+
+    def test_managed_old_payload_removed_before_new_acquisition(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / 'flatpak-sideload').mkdir()
+        (self.dest / 'flatpak-sideload' / 'old').write_text('stale')
+        module.MARKER.write_text(module.MARKER_CONTENT)
+        module.assert_build_tree_ready()
+        self.assertFalse(self.dest.exists())
+
+    def test_invalid_marker_prevents_reuse(self):
+        self.dest.mkdir(parents=True)
+        module.MARKER.write_text('unknown source')
+        with self.assertRaisesRegex(ValueError, 'unknown build input marker'):
+            module.assert_build_tree_ready()
+        self.assertTrue(module.MARKER.exists())
+
+    def test_foreign_files_in_managed_stage_preserved(self):
+        self.dest.mkdir(parents=True)
+        module.MARKER.write_text(module.MARKER_CONTENT)
+        (self.dest / 'unrelated').write_text('protect')
+        with self.assertRaisesRegex(ValueError, 'foreign data'):
+            module.assert_build_tree_ready()
+        self.assertEqual((self.dest / 'unrelated').read_text(), 'protect')
+
+    def test_nonroot_prevents_any_mutation(self):
+        self.dest.mkdir(parents=True)
+        module.MARKER.write_text(module.MARKER_CONTENT)
+        with patch.object(module.os, 'geteuid', return_value=1000):
+            with self.assertRaisesRegex(ValueError, 'sudo/root'):
+                module.assert_build_tree_ready()
+        self.assertTrue(module.MARKER.exists())
+
+    def test_fresh_flow_invokes_online_acquisition_then_usb_export(self):
+        from unittest.mock import MagicMock
+        self.dest.parent.mkdir(parents=True, exist_ok=True)
+        stager = MagicMock()
+        stager.LOCK = self.dest / 'offline-lock.json'
+        stager.DEST = self.dest / 'flatpak-sideload'
+        expected_refs = [
+            'app/com.github.tchx84.Flatseal/x86_64/stable',
+            'app/com.rustdesk.RustDesk/x86_64/stable',
+            'app/org.onlyoffice.desktopeditors/x86_64/stable',
+            'runtime/com.rustdesk.RustDesk.Locale/x86_64/stable',
+            'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08',
+            'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra',
+            'runtime/org.freedesktop.Platform.Locale/x86_64/25.08',
+            'runtime/org.freedesktop.Platform.VAAPI.Intel/x86_64/25.08',
+            'runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra',
+            'runtime/org.freedesktop.Platform/x86_64/25.08',
+            'runtime/org.gnome.Platform.Locale/x86_64/50',
+            'runtime/org.gnome.Platform/x86_64/50',
+        ]
+        stager.load_snapshot.return_value = {
+            'deployments': [{'ref': ref} for ref in expected_refs]}
+
+        def stage(source, manifest):
+            stager.DEST.mkdir(parents=True)
+            (stager.DEST / '.ostree/repo/objects').mkdir(parents=True)
+            stager.LOCK.write_text('{}')
+
+        stager.stage.side_effect = stage
+        trust = MagicMock()
+        trust.load_assets.return_value = ({}, {}, b'')
+        trust.safe_environment.return_value = {'PATH': '/usr/bin'}
+        with patch.object(module, 'load_script', side_effect=[trust, stager]), \
+             patch.object(module.subprocess, 'run') as runner:
+            module.prepare()
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(runner.call_args_list[0].args[0][0], 'python3')
+        self.assertIn('acquire-online', runner.call_args_list[0].args[0])
+        command = runner.call_args_list[1].args[0]
+        self.assertEqual(command[:4], ['flatpak', 'create-usb', '--system', '--allow-partial'])
+        # Locale extensions are intentionally not explicit arguments; the
+        # stage validator still requires ALL 12 pinned refs in the export.
+        exported = command[5:]
+        self.assertEqual(len(exported), 9)
+        self.assertTrue(all(not ref.split('/')[1].endswith('.Locale')
+                            for ref in exported))
+        self.assertEqual(set(exported), set(expected_refs) - {
+            ref for ref in expected_refs if ref.split('/')[1].endswith('.Locale')})
+        self.assertEqual(module.MARKER.read_text(), module.MARKER_CONTENT)
+
+    def test_failed_usb_export_preserves_download_and_does_not_stage(self):
+        import subprocess
+        from unittest.mock import MagicMock
+        scratch = Path(self.dir.name) / 'export-failed'
+        scratch.mkdir(mode=0o700)
+        flathub = MagicMock()
+        flathub.load_assets.return_value = ({}, {}, b'')
+        flathub.safe_environment.return_value = {'PATH': '/usr/bin'}
+        stager = MagicMock()
+        stager.load_snapshot.return_value = {'deployments': [
+            {'ref': f'app/org.example.Test{i}/x86_64/stable'} for i in range(9)
+        ] + [
+            {'ref': f'runtime/org.example.Test{i}.Locale/x86_64/stable'}
+            for i in range(3)
+        ]}
+        with patch.object(module, 'load_script', side_effect=[flathub, stager]), \
+             patch.object(module.tempfile, 'mkdtemp', return_value=str(scratch)), \
+             patch.object(module.subprocess, 'run', side_effect=[
+                 subprocess.CompletedProcess('acquire', 0),
+                 subprocess.CalledProcessError(1, 'create-usb')
+             ]) as runner:
+            with self.assertRaises(subprocess.CalledProcessError):
+                module.prepare()
+        self.assertEqual(runner.call_count, 2)
+        self.assertTrue(scratch.is_dir(), 'retain 0700 acquisition after export failure')
+        self.assertFalse(module.MARKER.exists())
+        stager.stage.assert_not_called()
+
+    def test_failed_download_never_creates_build_marker(self):
+        import subprocess
+        from unittest.mock import MagicMock
+        trust = MagicMock()
+        trust.load_assets.return_value = ({}, {}, b'')
+        trust.safe_environment.return_value = {'PATH': '/usr/bin'}
+        # Simulate a failing download without creating a live temp directory
+        # outside the test-owned scratch tree.
+        scratch = Path(self.dir.name) / 'failed-acquisition'
+        scratch.mkdir(mode=0o700)
+        with patch.object(module, 'load_script', return_value=trust), \
+             patch.object(module.tempfile, 'mkdtemp', return_value=str(scratch)), \
+             patch.object(module.subprocess, 'run',
+                          side_effect=subprocess.CalledProcessError(1, 'flatpak')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                module.prepare()
+        self.assertFalse(module.MARKER.exists())
+        self.assertTrue(scratch.exists(), 'failed acquisition must be retained')
+
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

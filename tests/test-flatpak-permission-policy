@@ -1,0 +1,133 @@
+#!/usr/bin/python3
+"""Deterministic, no-root/no-Flatpak regression tests for Phase 4 policy."""
+import importlib.machinery
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = (ROOT / "config/includes.chroot_after_packages/usr/local/sbin/"
+          "edbp-flatpak-policy")
+policy = importlib.machinery.SourceFileLoader("edbp_policy", str(SCRIPT)).load_module()
+
+ACCEPTED = """[Context]
+shared=!network;
+filesystems=!host;xdg-desktop;xdg-documents;
+sockets=!pulseaudio;
+
+[Session Bus Policy]
+org.gtk.vfs.*=none
+"""
+
+
+class PolicyTests(unittest.TestCase):
+    def test_app_and_options_are_narrowly_scoped(self):
+        self.assertEqual(policy.APP, "org.onlyoffice.desktopeditors")
+        self.assertEqual(policy.OPTIONS, (
+            "--unshare=network", "--nofilesystem=host",
+            "--filesystem=xdg-documents", "--filesystem=xdg-desktop",
+            "--nosocket=pulseaudio", "--no-talk-name=org.gtk.vfs.*"))
+        self.assertNotIn("--filesystem=home", policy.OPTIONS)
+        self.assertNotIn("--filesystem=host", policy.OPTIONS)
+        self.assertNotIn("--nofilesystem=host:reset", policy.OPTIONS)
+        self.assertNotIn("--nosocket=x11", policy.OPTIONS)
+        self.assertNotIn("--nodevice=dri", policy.OPTIONS)
+
+    def test_expected_baseline_and_reject_weakened_profiles(self):
+        self.assertTrue(policy.is_baseline(ACCEPTED))
+        self.assertFalse(policy.is_baseline(""))
+        for forbidden in ("shared=network;", "filesystems=host;",
+                          "sockets=pulseaudio;", "org.gtk.vfs.*=talk"):
+            self.assertFalse(policy.is_baseline(
+                ACCEPTED.replace({"shared=network;": "shared=!network;",
+                                  "filesystems=host;": "filesystems=!host;xdg-desktop;xdg-documents;",
+                                  "sockets=pulseaudio;": "sockets=!pulseaudio;",
+                                  "org.gtk.vfs.*=talk": "org.gtk.vfs.*=none"}[forbidden],
+                                 forbidden)))
+        self.assertFalse(policy.is_baseline(ACCEPTED + "\n[Environment]\nFOO=bar\n"))
+
+    def test_document_and_desktop_grants_are_exact_and_order_independent(self):
+        expected = "!host;xdg-desktop;xdg-documents;"
+        self.assertTrue(policy.is_baseline(ACCEPTED))
+        self.assertTrue(policy.is_baseline(ACCEPTED.replace(
+            expected, "xdg-documents;!host;xdg-desktop;")))
+        for replacement in (
+            "!host:reset;", "!host;xdg-documents;", "!host;xdg-desktop;",
+            "host;xdg-desktop;xdg-documents;", "!host;xdg-desktop;xdg-documents;home;",
+        ):
+            self.assertFalse(policy.is_baseline(ACCEPTED.replace(expected, replacement)))
+
+    def test_apply_creates_only_expected_override_and_is_idempotent(self):
+        state = [""]
+        commands = []
+
+        def fake(*args):
+            commands.append(args)
+            if args[:2] == ("info", "--system"):
+                return "app installed\n"
+            if args[:3] == ("override", "--system", "--show"):
+                return state[0]
+            if args[:2] == ("override", "--system") and args[-1] == policy.APP:
+                self.assertEqual(args[2:-1], policy.OPTIONS)
+                state[0] = ACCEPTED
+                return ""
+            raise AssertionError(f"Unexpected Flatpak command: {args}")
+
+        with patch.object(policy, "flatpak", side_effect=fake):
+            policy.apply()
+            before = len(commands)
+            policy.apply()
+            self.assertEqual(len(commands) - before, 2)  # info and read-only show
+        self.assertEqual(sum("--unshare=network" in args for args in commands), 1)
+
+    def test_foreign_override_fails_before_any_change(self):
+        commands = []
+
+        def fake(*args):
+            commands.append(args)
+            return "[Context]\nshared=network;\n" if "--show" in args else "ok"
+
+        with patch.object(policy, "flatpak", side_effect=fake):
+            with self.assertRaisesRegex(policy.PolicyError, "refusing to overwrite"):
+                policy.apply()
+        self.assertTrue(all("--unshare=network" not in cmd for cmd in commands))
+
+    def test_rollback_only_when_exact_policy_matches(self):
+        state = [ACCEPTED]
+        commands = []
+
+        def fake(*args):
+            commands.append(args)
+            if args[:3] == ("override", "--system", "--show"):
+                return state[0]
+            if args == ("override", "--system", "--reset", policy.APP):
+                state[0] = ""
+                return ""
+            raise AssertionError(args)
+
+        with patch.object(policy, "flatpak", side_effect=fake):
+            policy.rollback()
+        self.assertEqual(state[0], "")
+        self.assertIn(("override", "--system", "--reset", policy.APP), commands)
+
+    def test_user_override_conflict_detection(self):
+        with patch.object(policy, "flatpak", side_effect=["", ""]):
+            policy.audit_user()
+        with patch.object(policy, "flatpak", side_effect=["[Context]\nshared=network;", ""]):
+            with self.assertRaisesRegex(policy.PolicyError, "user override conflict"):
+                policy.audit_user()
+
+    def test_hook_runs_policy_only_after_pinned_ref_verification(self):
+        hook = (ROOT / "config/hooks/live/070-configure-flatpak.hook.chroot").read_text()
+        verified = hook.index('"$tool" verify --require-apps')
+        applied = hook.index('"$policy_tool" apply')
+        self.assertLess(verified, applied)
+        self.assertNotIn("sudo ", hook[applied:])
+
+    def test_verify_runner_contains_phase4_test(self):
+        runner = (ROOT / "scripts/verify-flatpak").read_text()
+        self.assertIn("python3 tests/test-flatpak-permission-policy", runner)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,44 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+PROJECT_ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$PROJECT_ROOT"
+
+tool=config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak
+assets=config/includes.chroot_after_packages/usr/share/edbp/flatpak
+
+python3 "$tool" --assets "$assets" verify-sources
+python3 tests/test-flatpak-integration
+python3 tests/test-flatpak-permission-policy
+python3 tests/test-flatseal-admin-scope
+python3 tests/test-flatpak-offline
+python3 tests/test-flatpak-fresh
+sh -n config/hooks/live/070-configure-flatpak.hook.chroot
+bash -n scripts/verify-flatpak
+python3 - <<'PYCODE'
+import ast
+from pathlib import Path
+for file in ('config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak',
+             'scripts/stage-flatpak-offline',
+             'scripts/prepare-flatpak-build',
+             'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatseal-admin'):
+    ast.parse(Path(file).read_text(), filename=file)
+PYCODE
+test -x scripts/stage-flatpak-offline
+test -x scripts/prepare-flatpak-build
+test -x "$tool"
+test -x config/includes.chroot_after_packages/usr/local/sbin/edbp-flatseal-admin
+test -x tests/test-flatseal-admin-scope
+sh -n config/includes.installer/edbp-late-command
+test -x scripts/verify-flatpak
+test -x config/hooks/live/070-configure-flatpak.hook.chroot
+
+if command -v shellcheck >/dev/null 2>&1; then
+    shellcheck --severity=style scripts/verify-flatpak \
+        config/hooks/live/070-configure-flatpak.hook.chroot
+else
+    printf '%s\n' 'BLOCKED: ShellCheck is unavailable' >&2
+    exit 1
+fi
+
+printf '%s\n' 'PASS: Flatpak source integration checks (not runtime/ISO acceptance)'

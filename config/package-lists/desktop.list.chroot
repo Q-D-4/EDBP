@@ -13,6 +13,19 @@ powerdevil
 upower
 systemsettings
 xdg-desktop-portal-kde
+xdg-desktop-portal
+
+# Flatpak session/trust/export integration with APT Recommends disabled.
+# Retain KDE as the sole explicitly selected portal backend.
+dbus-user-session
+libpam-systemd
+polkitd
+p11-kit
+desktop-file-utils
+gtk-update-icon-cache
+hicolor-icon-theme
+shared-mime-info
+xdg-user-dirs
 kio-extras
 kf6-breeze-icon-theme
 

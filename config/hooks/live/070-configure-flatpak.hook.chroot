@@ -1,0 +1,70 @@
+#!/bin/sh
+
+set -eu
+
+tool=/usr/local/sbin/edbp-flatpak
+assets=/usr/share/edbp/flatpak
+rule=/etc/polkit-1/rules.d/00-edbp-flatpak-admin.rules
+
+chown root:root "$tool" "$rule" "$assets" "$assets"/*
+chmod 0755 "$tool" "$assets"
+chmod 0644 "$rule" "$assets"/*
+
+for package in flatpak gpg xdg-desktop-portal xdg-desktop-portal-kde \
+    dbus-user-session libpam-systemd polkitd p11-kit; do
+    dpkg-query -W -f='${Status}\n' "$package" \
+        | grep -Fqx 'install ok installed' || {
+        printf 'ERROR: required Flatpak integration package is missing: %s\n' "$package" >&2
+        exit 1
+    }
+done
+
+# Fail closed: an image containing only a remote without actual applications
+# must never pass. The prepared repo is temporary input, removed by hook 090.
+repo=/opt/edbp-build-inputs/flatpak-sideload/.ostree/repo
+build_inputs=/opt/edbp-build-inputs
+lock="$build_inputs/offline-lock.json"
+marker="$build_inputs/.edbp-fresh-build"
+if [ ! -f "$marker" ] || [ -L "$marker" ] || \
+   [ "$(cat "$marker")" != 'EDBP fresh Flatpak build inputs v1' ] || \
+   [ ! -f "$lock" ] || [ -L "$lock" ] || \
+   [ ! -d "$repo/objects" ]; then
+    printf '%s\n' 'ERROR: pinned Flatpak offline payload/lock missing' >&2
+    exit 1
+fi
+# The image must receive this build's generated lock, not the historical
+# source-tree lock. Reject source/destination symlinks before replacement.
+if [ -L "$assets/offline-lock.json" ]; then
+    printf '%s\n' 'ERROR: historical image lock is a symlink' >&2
+    exit 1
+fi
+cp -- "$lock" "$assets/offline-lock.json"
+chmod 0644 "$assets/offline-lock.json"
+command -v unshare >/dev/null 2>&1 || {
+    printf '%s\n' 'ERROR: unshare unavailable; cannot enforce offline import' >&2
+    exit 1
+}
+# Flatpak remote-add may warn that online metadata cannot be refreshed; the
+# sideloaded signed commits and explicit lock are the only install sources.
+# A network namespace is sufficient for offline import; a mount namespace
+# is intentionally NOT created. Inside Live-Build's chroot, / may not be a
+# mountpoint and util-linux's automatic propagation change can fail with EINVAL.
+# /proc/net/dev is namespace-aware; the importer validates its actual netns.
+unshare --net -- "$tool" offline-install --sideload-repo "$repo"
+"$tool" verify --require-apps
+# Phase 4: apply ONLYOFFICE permission policy after offline verification.
+policy_tool=/usr/local/sbin/edbp-flatpak-policy
+if [ ! -f "$policy_tool" ] || [ -L "$policy_tool" ] || [ ! -x "$policy_tool" ]; then
+    printf '%s\n' 'ERROR: Flatpak permission policy tool is missing' >&2
+    exit 1
+fi
+"$policy_tool" apply
+"$policy_tool" verify
+# Phase 5 LAB: export signed/pinned Flatseal deployment as a root-private bundle.
+# The system app is removed from the installed target only after edbpadmin exists.
+flatseal_admin=/usr/local/sbin/edbp-flatseal-admin
+if [ ! -f "$flatseal_admin" ] || [ -L "$flatseal_admin" ] || [ ! -x "$flatseal_admin" ]; then
+    echo "ERROR: Flatseal admin provisioning tool missing" >&2
+    exit 1
+fi
+unshare --net -- "$flatseal_admin" prepare

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "definition_source": "https://dl.flathub.org/repo/flathub.flatpakrepo",
+  "retrieved_date": "2026-10-08",
+  "url": "https://dl.flathub.org/repo/",
+  "collection_id": "org.flathub.Stable",
+  "definition_sha256": "3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a",
+  "key_sha256": "8bdc20abc4e19c0796460beb5bfe0e7aa4138716999e19c6f2dbdd78cc41aeaa",
+  "primary_fingerprint": "6E5C05D979C76DAF93C081354184DD4D907A7CAE"
+}
