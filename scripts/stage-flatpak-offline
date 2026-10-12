@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+"""Stage reviewed Flatpak USB export into live-build chroot inputs, fail-closed.
+
+Run with sudo from the feature worktree. Neither source staging nor host
+/var/lib/flatpak is mutated. The ~1.4 GB payload is deliberately not Git data.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / 'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak'
+ASSETS = ROOT / 'config/includes.chroot_after_packages/usr/share/edbp/flatpak'
+DEST = ROOT / 'config/includes.chroot_after_packages/opt/edbp-build-inputs/flatpak-sideload'
+LOCK = DEST.parent / 'offline-lock.json'
+loader = importlib.machinery.SourceFileLoader('edbp_flatpak', str(TOOL))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def absolute_real_path(path):
+    if not path.is_absolute() or path.is_symlink() or path.resolve() != path:
+        raise ValueError(f'expected a canonical absolute directory/file: {path}')
+    return path
+
+
+def load_snapshot(path, trust, apps):
+    value = json.loads(module.regular_file(path))
+    if (value.get('schema_version') != 1
+            or value.get('architecture') != 'x86_64'
+            or value.get('scope') != 'system'
+            or value.get('definition_sha256') != trust['definition_sha256']
+            or value.get('signing_key_fingerprint') != trust['primary_fingerprint']):
+        raise ValueError('acquisition manifest identity mismatch')
+    records = value.get('deployments')
+    if not isinstance(records, list):
+        raise ValueError('acquisition deployments missing')
+    lock = {
+        'schema_version': 1,
+        'architecture': 'x86_64',
+        'origin': 'flathub',
+        'collection_id': trust['collection_id'],
+        'definition_sha256': trust['definition_sha256'],
+        'signing_key_fingerprint': trust['primary_fingerprint'],
+        'languages': ['ar', 'en'],
+        'deployments': sorted(
+            ({'ref': entry['ref'], 'commit': entry['commit']} for entry in records),
+            key=lambda entry: entry['ref']),
+    }
+    if any(entry.get('origin') != 'flathub' for entry in records):
+        raise ValueError('foreign acquisition origin')
+    module.validate_offline_lock(lock, trust, apps)
+    return lock
+
+
+def stage(source, manifest):
+    if os.geteuid() != 0:
+        raise ValueError('staging requires sudo to read the protected OSTree export')
+    absolute_real_path(ROOT)
+    absolute_real_path(source)
+    absolute_real_path(manifest)
+    if (source == Path('/') or source == DEST or source in DEST.parents
+            or DEST in source.parents):
+        raise ValueError('refusing overlapping source/destination')
+    if DEST.exists() or DEST.is_symlink() or LOCK.exists() or LOCK.is_symlink():
+        raise ValueError('offline payload or lock already exists; no overwrite')
+    trust, apps, _ = module.load_assets(ASSETS)
+    lock = load_snapshot(manifest, trust, apps)
+    repo = source / '.ostree/repo'
+    if repo.is_symlink() or repo.resolve() != repo or not repo.is_dir():
+        raise ValueError('source is not a create-usb offline repository')
+    module.verify_offline_repo(repo, module.validate_offline_lock(lock, trust, apps), trust)
+    print('Checking source OSTree objects; locale partial commits may remain partial', flush=True)
+    subprocess.run(['ostree', f'--repo={repo}', 'fsck', '--verify-bindings'],
+                   check=True, timeout=3600, env=module.safe_environment())
+    DEST.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    try:
+        # Copies a portable offline repository, not deployed files from /var/lib/flatpak.
+        shutil.copytree(source, DEST, symlinks=True)
+        staged_repo = DEST / '.ostree/repo'
+        module.verify_offline_repo(staged_repo,
+                                   module.validate_offline_lock(lock, trust, apps), trust)
+        # The copied repo must pass its own filesystem integrity check as well.
+        subprocess.run(['ostree', f'--repo={staged_repo}', 'fsck', '--verify-bindings'],
+                       check=True, timeout=3600, env=module.safe_environment())
+        LOCK.write_text(json.dumps(lock, indent=2, ensure_ascii=False) + '\n')
+        LOCK.chmod(0o644)
+    except BaseException:
+        # Only remove new outputs; never the original export or manifest.
+        LOCK.unlink(missing_ok=True)
+        if DEST.is_dir() and not DEST.is_symlink():
+            shutil.rmtree(DEST)
+        raise
+    print(f'PASS: staged offline payload at {DEST}')
+    print(f'PASS: generated reviewable pinned lock at {LOCK}')
+    print('IMPORTANT: preserve the generated lock as an ISO build artifact.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', required=True, type=Path,
+                        help='root of previously verified flatpak create-usb export')
+    parser.add_argument('--manifest', required=True, type=Path,
+                        help='original installed-manifest-phase2.json')
+    args = parser.parse_args()
+    stage(args.source, args.manifest)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        sys.exit(1)

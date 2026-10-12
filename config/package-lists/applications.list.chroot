@@ -8,3 +8,14 @@ element-io-archive-keyring
 # and Secret Service features that are not part of the stated requirement.
 keepassxc-minimal
 fonts-font-awesome
+
+# System-wide Flatpak management; gpg verifies the reviewed Flathub keyring.
+# Application payloads are separate from Debian packages and must be supplied
+# before the Flatpak image gate can pass.
+flatpak
+gpg
+
+# Phase 3 offline installation: verify staged OSTree refs and enforce an
+# isolated network namespace in the live-build chroot (no remote fallback).
+ostree
+util-linux

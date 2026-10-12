@@ -9,6 +9,8 @@ ISO := $(IMAGE_BASENAME).hybrid.iso
 PACKAGES := $(IMAGE_BASENAME).packages
 MANIFEST := $(IMAGE_BASENAME).manifest.json
 BUILD_INPUTS := $(IMAGE_BASENAME).build-inputs.json
+FLATPAK_LOCK := $(IMAGE_BASENAME).flatpak-lock.json
+FLATPAK_BUILD_LOCK := config/includes.chroot_after_packages/opt/edbp-build-inputs/offline-lock.json
 
 ADMIN_KEYS_SOURCE ?= secrets/edbpadmin_authorized_keys
 ADMIN_KEYS_STAGED := config/includes.installer/edbpadmin_authorized_keys
@@ -20,8 +22,8 @@ SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)
 
 export SOURCE_DATE_EPOCH
 
-.PHONY: all clean config build verify verify-test checksums verify-checksums \
-	stage-admin-keys stage-preseed stage-build-inputs scrub-build-inputs
+.PHONY: all clean config build verify verify-test verify-flatpak checksums verify-checksums \
+	stage-admin-keys stage-preseed stage-build-inputs scrub-build-inputs prepare-flatpak-build
 
 # Production entry point. The outer trap also scrubs staged secrets when a
 # prerequisite fails before the build target can establish its own trap.
@@ -45,6 +47,10 @@ verify:
 	EDBP_ADMIN_PASSWORD_HASH_FILE="$(ADMIN_PASSWORD_HASH_SOURCE)" \
 	./scripts/verify-tree
 
+# Focused source checks; requires neither production secrets nor an ISO build.
+verify-flatpak:
+	@./scripts/verify-flatpak
+
 # Static verification only. The synthetic hash is rendered into a temporary
 # directory and can never satisfy config/build dependencies.
 verify-test:
@@ -64,9 +70,18 @@ stage-preseed: verify
 		"$(PRESEED_TEMPLATE)" \
 		"$(PRESEED_STAGED)"
 
+# Every new build must contact Flathub and stage its own checked closure.
+# Never allow an earlier staging directory to satisfy a new build.
+prepare-flatpak-build: verify
+	@if (( EUID == 0 )); then \
+		./scripts/prepare-flatpak-build; \
+	else \
+		sudo -- ./scripts/prepare-flatpak-build; \
+	fi
+
 # Stage both inputs as one transaction. A failure in either step removes both
 # generated files so that no stale credential is consumed by a later build.
-stage-build-inputs: verify
+stage-build-inputs: prepare-flatpak-build
 	@{ \
 		./scripts/stage-admin-keys \
 			"$(ADMIN_KEYS_SOURCE)" \
@@ -130,10 +145,13 @@ build: config
 
 checksums: build
 	@test -s "$(BUILD_INPUTS)"
-	@sha256sum "$(ISO)" "$(PACKAGES)" "$(BUILD_INPUTS)" > SHA256SUMS
+	@test -s "$(FLATPAK_BUILD_LOCK)"
+	@install -m 0644 "$(FLATPAK_BUILD_LOCK)" "$(FLATPAK_LOCK)"
+	@sha256sum "$(ISO)" "$(PACKAGES)" "$(BUILD_INPUTS)" "$(FLATPAK_LOCK)" > SHA256SUMS
 	@iso_sha="$$(sha256sum "$(ISO)" | awk '{print $$1}')"; \
 	packages_sha="$$(sha256sum "$(PACKAGES)" | awk '{print $$1}')"; \
 	build_inputs_sha="$$(sha256sum "$(BUILD_INPUTS)" | awk '{print $$1}')"; \
+	flatpak_lock_sha="$$(sha256sum "$(FLATPAK_LOCK)" | awk '{print $$1}')"; \
 	admin_keys_sha="$$(jq --exit-status --raw-output '.edbpadmin_authorized_keys_sha256' "$(BUILD_INPUTS)")"; \
 	password_hash_sha="$$(jq --exit-status --raw-output '.edbpadmin_password_hash_sha256' "$(BUILD_INPUTS)")"; \
 	preseed_template_sha="$$(jq --exit-status --raw-output '.preseed_template_sha256' "$(BUILD_INPUTS)")"; \
@@ -154,21 +172,25 @@ checksums: build
 		--arg packages_sha256 "$$packages_sha" \
 		--arg build_inputs "$(BUILD_INPUTS)" \
 		--arg build_inputs_sha256 "$$build_inputs_sha" \
+		--arg flatpak_lock "$(FLATPAK_LOCK)" \
+		--arg flatpak_lock_sha256 "$$flatpak_lock_sha" \
 		--arg admin_keys_sha256 "$$admin_keys_sha" \
 		--arg password_hash_sha256 "$$password_hash_sha" \
 		--arg preseed_template_sha256 "$$preseed_template_sha" \
 		--arg rendered_preseed_sha256 "$$rendered_preseed_sha" \
-		'{version: $$version, architecture: $$architecture, git_commit: $$git_commit, source_date_epoch: ($$source_date_epoch | tonumber), source_date_utc: $$source_date_utc, manifest_created_utc: $$manifest_created_utc, build_inputs: {edbpadmin_authorized_keys_sha256: $$admin_keys_sha256, edbpadmin_password_hash_sha256: $$password_hash_sha256, preseed_template_sha256: $$preseed_template_sha256, rendered_preseed_sha256: $$rendered_preseed_sha256}, artifacts: {iso: {path: $$iso, sha256: $$iso_sha256}, packages: {path: $$packages, sha256: $$packages_sha256}, build_inputs: {path: $$build_inputs, sha256: $$build_inputs_sha256}}}' \
+		'{version: $$version, architecture: $$architecture, git_commit: $$git_commit, source_date_epoch: ($$source_date_epoch | tonumber), source_date_utc: $$source_date_utc, manifest_created_utc: $$manifest_created_utc, build_inputs: {edbpadmin_authorized_keys_sha256: $$admin_keys_sha256, edbpadmin_password_hash_sha256: $$password_hash_sha256, preseed_template_sha256: $$preseed_template_sha256, rendered_preseed_sha256: $$rendered_preseed_sha256}, artifacts: {iso: {path: $$iso, sha256: $$iso_sha256}, packages: {path: $$packages, sha256: $$packages_sha256}, build_inputs: {path: $$build_inputs, sha256: $$build_inputs_sha256}, flatpak_lock: {path: $$flatpak_lock, sha256: $$flatpak_lock_sha256}}}' \
 		> "$(MANIFEST)"
 
 verify-checksums:
 	@test -s SHA256SUMS
 	@test -s "$(MANIFEST)"
 	@test -s "$(BUILD_INPUTS)"
+	@test -s "$(FLATPAK_LOCK)"
 	@sha256sum --check --strict SHA256SUMS
 	@iso_sha="$$(sha256sum "$(ISO)" | awk '{print $$1}')"; \
 	packages_sha="$$(sha256sum "$(PACKAGES)" | awk '{print $$1}')"; \
 	build_inputs_sha="$$(sha256sum "$(BUILD_INPUTS)" | awk '{print $$1}')"; \
+	flatpak_lock_sha="$$(sha256sum "$(FLATPAK_LOCK)" | awk '{print $$1}')"; \
 	jq --exit-status '([.edbpadmin_authorized_keys_sha256, .edbpadmin_password_hash_sha256, .preseed_template_sha256, .rendered_preseed_sha256] | all(type == "string" and test("^[0-9a-f]{64}$$"))) and (keys | sort) == ["edbpadmin_authorized_keys_sha256", "edbpadmin_password_hash_sha256", "preseed_template_sha256", "rendered_preseed_sha256"]' "$(BUILD_INPUTS)" >/dev/null; \
 	admin_keys_sha="$$(jq --raw-output '.edbpadmin_authorized_keys_sha256' "$(BUILD_INPUTS)")"; \
 	password_hash_sha="$$(jq --raw-output '.edbpadmin_password_hash_sha256' "$(BUILD_INPUTS)")"; \
@@ -190,11 +212,13 @@ verify-checksums:
 		--arg packages_sha256 "$$packages_sha" \
 		--arg build_inputs "$(BUILD_INPUTS)" \
 		--arg build_inputs_sha256 "$$build_inputs_sha" \
+		--arg flatpak_lock "$(FLATPAK_LOCK)" \
+		--arg flatpak_lock_sha256 "$$flatpak_lock_sha" \
 		--arg admin_keys_sha256 "$$admin_keys_sha" \
 		--arg password_hash_sha256 "$$password_hash_sha" \
 		--arg preseed_template_sha256 "$$preseed_template_sha" \
 		--arg rendered_preseed_sha256 "$$rendered_preseed_sha" \
-		'.version == $$version and .architecture == $$architecture and .git_commit == $$git_commit and .source_date_epoch == ($$source_date_epoch | tonumber) and .source_date_utc == $$source_date_utc and (.manifest_created_utc | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$$")) and .build_inputs.edbpadmin_authorized_keys_sha256 == $$admin_keys_sha256 and .build_inputs.edbpadmin_password_hash_sha256 == $$password_hash_sha256 and .build_inputs.preseed_template_sha256 == $$preseed_template_sha256 and .build_inputs.rendered_preseed_sha256 == $$rendered_preseed_sha256 and .artifacts.iso.path == $$iso and .artifacts.iso.sha256 == $$iso_sha256 and .artifacts.packages.path == $$packages and .artifacts.packages.sha256 == $$packages_sha256 and .artifacts.build_inputs.path == $$build_inputs and .artifacts.build_inputs.sha256 == $$build_inputs_sha256' \
+		'.version == $$version and .architecture == $$architecture and .git_commit == $$git_commit and .source_date_epoch == ($$source_date_epoch | tonumber) and .source_date_utc == $$source_date_utc and (.manifest_created_utc | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$$")) and .build_inputs.edbpadmin_authorized_keys_sha256 == $$admin_keys_sha256 and .build_inputs.edbpadmin_password_hash_sha256 == $$password_hash_sha256 and .build_inputs.preseed_template_sha256 == $$preseed_template_sha256 and .build_inputs.rendered_preseed_sha256 == $$rendered_preseed_sha256 and .artifacts.iso.path == $$iso and .artifacts.iso.sha256 == $$iso_sha256 and .artifacts.packages.path == $$packages and .artifacts.packages.sha256 == $$packages_sha256 and .artifacts.build_inputs.path == $$build_inputs and .artifacts.build_inputs.sha256 == $$build_inputs_sha256 and .artifacts.flatpak_lock.path == $$flatpak_lock and .artifacts.flatpak_lock.sha256 == $$flatpak_lock_sha256' \
 		"$(MANIFEST)" >/dev/null
 
 scrub-build-inputs:
@@ -211,6 +235,7 @@ clean:
 		"$(PACKAGES)" \
 		"$(MANIFEST)" \
 		"$(BUILD_INPUTS)" \
+		"$(FLATPAK_LOCK)" \
 		chroot.packages.install \
 		chroot.packages.live \
 		SHA256SUMS \

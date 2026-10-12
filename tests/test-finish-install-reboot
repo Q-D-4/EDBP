@@ -25,7 +25,7 @@ preseed=config/includes.installer/preseed.cfg.in
 reviewed_stock_sha256=e2400dba755604c27c362e56cbc10dad6fee461856bffe645906ca113ed40808
 reviewed_exit_replacement_sha256=e00cd9d4ba18354147cab8d59b37edce61db5011d213f8196f57b79e60112e7f
 reviewed_reboot_wrapper_sha256=fcaa29de5e1b76947db266501d80ba70dee80cc598a28bae433a64aa2cb713d2
-reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.'
+reviewed_busybox_banner='BusyBox v1.37.0 (Debian 1:1.37.0-6+b9) multi-call binary.'
 test_directory=$(mktemp -d)
 trap 'rm -rf -- "${test_directory}"' EXIT
 
@@ -345,6 +345,15 @@ assert_stock_unchanged "${scenario_exit}"
 [[ $(<"${scenario_reboot}") == $'#!/bin/sh\nexit 1' ]] \
     || fail 'reboot-state validation changed unexpected reboot bytes'
 assert_no_temporary "${scenario_directory}"
+
+# The preceding Debian rebuild must not silently pass the new reviewed pin.
+prepare_scenario previous-busybox-rebuild
+previous_rebuild_target=${scenario_busybox}
+sed -i 's/1:1[.]37[.]0-6+b9/1:1.37.0-6+b8/' "${scenario_busybox}"
+grep -Fq 'BusyBox v1.37.0 (Debian 1:1.37.0-6+b8) multi-call binary.' "${scenario_busybox}" \
+    || fail 'previous rebuild test fixture was not downgraded to b8'
+capture_status env LIVE_INSTALLER_MODE=1 "${scenario_runner}"
+assert_failed_scenario_unchanged "${previous_rebuild_target}"
 
 prepare_scenario wrong-busybox-banner
 wrong_banner_reboot_target=${scenario_busybox}

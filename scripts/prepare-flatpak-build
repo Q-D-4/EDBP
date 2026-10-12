@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+"""Fresh, fail-closed Flathub acquisition for each EDBP ISO build.
+
+Runs as root on an isolated build host. Reuses trusted project modules, NOT
+Flatpak data from an earlier run. Does not modify /var/lib/flatpak.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+ASSETS = ROOT / 'config/includes.chroot_after_packages/usr/share/edbp/flatpak'
+TOOL = ROOT / 'config/includes.chroot_after_packages/usr/local/sbin/edbp-flatpak'
+STAGER = ROOT / 'scripts/stage-flatpak-offline'
+DEST = ROOT / 'config/includes.chroot_after_packages/opt/edbp-build-inputs'
+MARKER = DEST / '.edbp-fresh-build'
+MARKER_CONTENT = 'EDBP fresh Flatpak build inputs v1\n'
+
+
+def load_script(filename, name):
+    loader = importlib.machinery.SourceFileLoader(name, str(filename))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def assert_build_tree_ready():
+    if os.geteuid() != 0:
+        raise ValueError('fresh acquisition requires sudo/root')
+    if ROOT.is_symlink() or ROOT.resolve() != ROOT:
+        raise ValueError('noncanonical repository root')
+    # Live-Build may skip include-copy when resuming from a failed chroot.
+    # Never silently produce an ISO with a former run's inputs.
+    for name in ('chroot', 'binary'):
+        if (ROOT / name).exists() or (ROOT / name).is_symlink():
+            raise ValueError(f'previous live-build state ({name}) exists; '
+                             'preserve logs, explicitly reset before fresh build')
+    if DEST.is_symlink() or any(parent.is_symlink() for parent in
+                               (DEST.parent, DEST.parent.parent)):
+        raise ValueError('unsafe build input parent symlink')
+    if DEST.exists():
+        if not DEST.is_dir() or MARKER.is_symlink() or not MARKER.is_file():
+            raise ValueError('unmanaged Flatpak build inputs exist; preserve '
+                             'legacy payload before enabling fresh builds')
+        if MARKER.read_text() != MARKER_CONTENT:
+            raise ValueError('unknown build input marker; refusing reuse or deletion')
+        for name in ('flatpak-sideload', 'offline-lock.json', '.edbp-fresh-build'):
+            child = DEST / name
+            if child.is_symlink():
+                raise ValueError('symlink in managed build inputs')
+        if set(path.name for path in DEST.iterdir()) - {
+                'flatpak-sideload', 'offline-lock.json', '.edbp-fresh-build'}:
+            raise ValueError('foreign data in managed build inputs')
+        # Removing only a previously generated, explicitly marked input tree.
+        # Stale payload must never satisfy an offline build.
+        shutil.rmtree(DEST)
+
+
+def prepare():
+    assert_build_tree_ready()
+    flatpak = load_script(TOOL, 'edbp_fresh_flatpak')
+    stager = load_script(STAGER, 'edbp_fresh_stager')
+    trust, apps, _ = flatpak.load_assets(ASSETS)
+    # Preserve an isolated, root-owned acquisition on failure so a failed
+    # create-usb export can be inspected without downloading multiple GB again.
+    # No later build automatically adopts this directory.
+    scratch = Path(tempfile.mkdtemp(prefix='edbp-flatpak-acquire-'))
+    success = False
+    try:
+        install = scratch / 'install'
+        exported = scratch / 'export'
+        exported.mkdir(mode=0o700)
+        print('=== Fresh isolated Flathub acquisition ===', flush=True)
+        subprocess.run(['python3', str(TOOL), '--assets', str(ASSETS),
+                        'acquire-online', '--stage', str(install)],
+                       env=flatpak.safe_environment(), check=True, timeout=14400)
+        manifest = install / 'installed-manifest.json'
+        # Reject new runtimes/other refs before exporting them.
+        lock = stager.load_snapshot(manifest, trust, apps)
+        refs = [entry['ref'] for entry in lock['deployments']]
+        if len(refs) != 12:
+            raise ValueError('unexpected reviewed ref closure')
+        print('=== Export fresh revisions to isolated OSTree USB repository ===',
+              flush=True)
+        # Locale extensions can appear in `flatpak list --all` and have a
+        # commit, yet not be individually exportable as explicit installed
+        # refs. create-usb includes dependency extensions transitively. Keep
+        # ALL 12 refs in the lock; stager.stage MUST reject an incomplete or
+        # substituted export instead of weakening the security policy.
+        explicit_refs = [ref for ref in refs
+                         if not ref.split('/')[1].endswith('.Locale')]
+        if len(explicit_refs) != 9 or len(refs) != 12:
+            raise ValueError('unexpected Flatpak export closure')
+        subprocess.run(['flatpak', 'create-usb', '--system', '--allow-partial',
+                        str(exported), *explicit_refs],
+                       env=flatpak.safe_environment(install),
+                       check=True, timeout=7200)
+        print('=== Verify and stage fresh offline repository ===', flush=True)
+        stager.stage(exported, manifest)
+        success = True
+    finally:
+        if success:
+            shutil.rmtree(scratch)
+        else:
+            print(f'RETAINED: isolated acquisition for forensic review: {scratch}',
+                  file=sys.stderr, flush=True)
+    # Only a validated complete tree is allowed to gain the build marker.
+    if not stager.LOCK.is_file() or not (stager.DEST / '.ostree/repo/objects').is_dir():
+        raise ValueError('fresh offline export staging is incomplete')
+    with MARKER.open('x', encoding='ascii') as stream:
+        stream.write(MARKER_CONTENT)
+        stream.flush()
+        os.fsync(stream.fileno())
+    MARKER.chmod(0o644)
+    print('PASS: fresh Flathub acquisition staged; no old payload reused')
+
+
+if __name__ == '__main__':
+    try:
+        prepare()
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError,
+            json.JSONDecodeError) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        sys.exit(1)

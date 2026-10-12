@@ -1,0 +1,495 @@
+#!/usr/bin/python3
+"""EDBP Flatpak trust, isolated acquisition, pinned offline import, inspection.
+
+Does not launch applications. Mandatory application policy enforcement and
+functional acceptance are separate from this offline source-integration phase.
+"""
+
+import argparse
+import base64
+import configparser
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+DEFAULT_ASSETS = Path('/usr/share/edbp/flatpak')
+STAGE_MARKER = 'EDBP isolated Flatpak acquisition v1\n'
+EXPECTED_APPS = {
+    'app/org.onlyoffice.desktopeditors/x86_64/stable',
+    'app/com.rustdesk.RustDesk/x86_64/stable',
+    'app/com.github.tchx84.Flatseal/x86_64/stable',
+}
+EXPECTED_RUNTIMES = {
+    'runtime/com.rustdesk.RustDesk.Locale/x86_64/stable',
+    'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08',
+    'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra',
+    'runtime/org.freedesktop.Platform.Locale/x86_64/25.08',
+    'runtime/org.freedesktop.Platform.VAAPI.Intel/x86_64/25.08',
+    'runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra',
+    'runtime/org.freedesktop.Platform/x86_64/25.08',
+    'runtime/org.gnome.Platform.Locale/x86_64/50',
+    'runtime/org.gnome.Platform/x86_64/50',
+}
+REF_PATTERN = re.compile(r'(app|runtime)/[A-Za-z0-9_.-]+/x86_64/[A-Za-z0-9_.-]+')
+
+
+def regular_file(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f'expected a regular non-symlink file: {path}')
+    return path.read_bytes()
+
+
+def key_fingerprints(key):
+    # Read public keys without importing into the administrator's GPG home.
+    with tempfile.TemporaryDirectory(prefix='edbp-flatpak-gpg-') as home:
+        result = subprocess.run(
+            ['gpg', '--batch', '--homedir', home, '--with-colons', '--show-keys'],
+            input=key, env=safe_environment(), capture_output=True, check=True, timeout=30,
+        )
+    fingerprints = []
+    primary = False
+    for line in result.stdout.decode('ascii').splitlines():
+        fields = line.split(':')
+        if fields[0] == 'pub':
+            primary = True
+        elif fields[0] == 'sub':
+            primary = False
+        elif fields[0] == 'fpr' and primary:
+            fingerprints.append(fields[9])
+            primary = False
+    return fingerprints
+
+
+def load_assets(directory):
+    trust = json.loads(regular_file(directory / 'trust.json'))
+    apps = json.loads(regular_file(directory / 'approved-apps.json'))
+    definition = regular_file(directory / 'flathub.flatpakrepo')
+    filter_bytes = regular_file(directory / 'flathub.filter')
+    if trust['schema_version'] != 1 or apps['schema_version'] != 1:
+        raise ValueError('unsupported asset schema')
+    if hashlib.sha256(definition).hexdigest() != trust['definition_sha256']:
+        raise ValueError('Flathub definition checksum mismatch')
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.read_string(definition.decode('utf-8'))
+    remote = parser['Flatpak Repo']
+    if remote['Url'] != trust['url'] or trust['url'] != 'https://dl.flathub.org/repo/':
+        raise ValueError('unapproved Flathub repository URL')
+    if trust['collection_id'] != 'org.flathub.Stable':
+        raise ValueError('unapproved collection ID')
+    key = base64.b64decode(remote['GPGKey'], validate=True)
+    if hashlib.sha256(key).hexdigest() != trust['key_sha256']:
+        raise ValueError('Flathub signing key checksum mismatch')
+    if key_fingerprints(key) != [trust['primary_fingerprint']]:
+        raise ValueError('Flathub primary signing key mismatch')
+    if (apps['architecture'] != 'x86_64' or apps['origin'] != 'flathub'
+            or len(apps['applications']) != 3
+            or set(apps['applications']) != EXPECTED_APPS):
+        raise ValueError('approved application catalog mismatch')
+    rules = [line.strip() for line in filter_bytes.decode().splitlines()
+             if line.strip() and not line.lstrip().startswith('#')]
+    expected_rules = ['deny *'] + [f'allow {ref}' for ref in apps['applications']]
+    expected_rules.append('allow runtime/*/x86_64/*')
+    if rules != expected_rules:
+        raise ValueError('Flathub acquisition filter mismatch')
+    return trust, apps, filter_bytes
+
+
+def safe_environment(stage=None):
+    # In particular, do not inherit FLATPAK_SYSTEM_DIR, FLATPAK_BWRAP, proxy
+    # selection, loader injection, or another user's D-Bus session.
+    env = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+           'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'HOME': '/root'}
+    if stage is not None:
+        paths = {
+            'HOME': 'home', 'XDG_CONFIG_HOME': 'xdg-config',
+            'XDG_DATA_HOME': 'xdg-data', 'XDG_CACHE_HOME': 'xdg-cache',
+            'XDG_RUNTIME_DIR': 'run', 'FLATPAK_CONFIG_DIR': 'etc/flatpak',
+            'FLATPAK_SYSTEM_DIR': 'var/lib/flatpak',
+            'FLATPAK_SYSTEM_CACHE_DIR': 'var/cache/flatpak',
+            'FLATPAK_USER_DIR': 'unused-user-installation',
+        }
+        for variable, relative in paths.items():
+            path = stage / relative
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if path.is_symlink() or path.resolve() != path:
+                raise ValueError('unsafe staging directory')
+            env[variable] = str(path)
+    return env
+
+
+class Flatpak:
+    def __init__(self, environment):
+        self.environment = environment
+        self.root = Path(environment.get('FLATPAK_SYSTEM_DIR', '/var/lib/flatpak'))
+        version = self.execute(['flatpak', '--version']).strip()
+        match = re.fullmatch(r'Flatpak (\d+)\.(\d+)\.(\d+).*', version)
+        if not match or tuple(map(int, match.groups())) < (1, 16, 0):
+            raise ValueError('Flatpak >= 1.16 is required')
+        if self.execute(['flatpak', '--default-arch']).strip() != 'x86_64':
+            raise ValueError('only x86_64 is approved')
+        self.version = version
+
+    def execute(self, command, timeout=120):
+        result = subprocess.run(command, env=self.environment, capture_output=True,
+                                text=True, check=True, timeout=timeout)
+        return result.stdout.rstrip('\n')
+
+    def run(self, command, *arguments, timeout=120):
+        return self.execute(['flatpak', command, '--system', *arguments], timeout)
+
+
+def check_remote(client, trust, filter_bytes=None, require_collection=True):
+    config = configparser.ConfigParser(interpolation=None, strict=True)
+    config.read_string(regular_file(client.root / 'repo/config').decode())
+    remote = config['remote "flathub"']
+    if remote.get('url') != trust['url']:
+        raise ValueError('existing Flathub URL drift; refusing to repair silently')
+    if not remote.getboolean('gpg-verify', fallback=False):
+        raise ValueError('existing Flathub commit signature verification is disabled')
+    if not remote.getboolean('gpg-verify-summary', fallback=False):
+        raise ValueError('existing Flathub summary signature verification is disabled')
+    key = regular_file(client.root / 'repo/flathub.trustedkeys.gpg')
+    if key_fingerprints(key) != [trust['primary_fingerprint']]:
+        raise ValueError('installed Flathub signing key drift')
+    if require_collection and remote.get('collection-id') != trust['collection_id']:
+        raise ValueError('Flathub collection ID mismatch')
+    if not require_collection and remote.get('collection-id', '') not in ('', trust['collection_id']):
+        raise ValueError('existing Flathub collection ID drift')
+    if remote.getboolean('xa.disable', fallback=False):
+        raise ValueError('Flathub remote is disabled')
+    if filter_bytes is not None:
+        path = Path(remote.get('xa.filter', ''))
+        if regular_file(path) != filter_bytes:
+            raise ValueError('installed Flathub acquisition filter mismatch')
+
+
+def configure(client, directory, trust, filter_bytes):
+    config_path = client.root / 'repo/config'
+    if config_path.exists():
+        config = configparser.ConfigParser(interpolation=None)
+        config.read_string(regular_file(config_path).decode())
+        if config.has_section('remote "flathub"'):
+            # Check identity before remote-add --if-not-exists, which may
+            # otherwise replace an existing remote's filter.
+            check_remote(client, trust, require_collection=False)
+    client.run('remote-add', '--if-not-exists', '--from',
+               f'--filter={directory / "flathub.filter"}',
+               'flathub', str(directory / 'flathub.flatpakrepo'))
+    client.run('remote-modify', f'--collection-id={trust["collection_id"]}',
+               f'--filter={directory / "flathub.filter"}', 'flathub')
+    # Both languages are staged even on a builder with an English-only locale.
+    client.run('config', '--set', 'languages', 'ar;en')
+    check_remote(client, trust, filter_bytes)
+
+
+def snapshot(client, trust, apps, require_apps):
+    check_remote(client, trust)
+    # Flatpak 1.16's list "ref" column omits the app/runtime prefix. Query
+    # each kind separately rather than guessing the type from an ID.
+    rows = []
+    for kind, option in (('app', '--app'), ('runtime', '--runtime')):
+        output = client.run('list', '--all', option, '--columns=ref,origin,version')
+        rows.extend((kind, line) for line in output.splitlines())
+    records = []
+    seen = set()
+    for kind, line in rows:
+        fields = line.split('\t')
+        if len(fields) < 2:
+            raise ValueError('unexpected Flatpak list output')
+        partial_ref, origin = fields[:2]
+        ref = f'{kind}/{partial_ref}'
+        if not REF_PATTERN.fullmatch(ref) or origin != 'flathub' or ref in seen:
+            raise ValueError('unapproved, duplicate, or malformed deployed ref')
+        if ref.startswith('app/') and ref not in EXPECTED_APPS:
+            raise ValueError('unapproved system application')
+        seen.add(ref)
+        commit = client.run('info', '--show-commit', ref).strip()
+        if not re.fullmatch(r'[0-9a-f]{64}', commit):
+            raise ValueError('invalid deployed OSTree commit')
+        record = {'ref': ref, 'origin': origin, 'commit': commit,
+                  'version': fields[2] if len(fields) > 2 else ''}
+        if ref.startswith('app/'):
+            runtime = client.run('info', '--show-runtime', ref).strip()
+            runtime_ref = f'runtime/{runtime}'
+            if not REF_PATTERN.fullmatch(runtime_ref):
+                raise ValueError('invalid application runtime')
+            record['runtime'] = runtime_ref
+            record['metadata_permissions'] = client.run('info', '--show-permissions', ref)
+        records.append(record)
+    if require_apps and not EXPECTED_APPS.issubset(seen):
+        raise ValueError('approved applications are missing; offline payload is not provisioned')
+    for record in records:
+        if 'runtime' in record and record['runtime'] not in seen:
+            raise ValueError(f'missing runtime for {record["ref"]}')
+    return {'schema_version': 1, 'architecture': apps['architecture'],
+            'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'flatpak_version': client.version, 'scope': 'system',
+            'definition_sha256': trust['definition_sha256'],
+            'signing_key_fingerprint': trust['primary_fingerprint'],
+            'status': 'acquisition-snapshot; not an enforced offline image lock',
+            'deployments': sorted(records, key=lambda record: record['ref'])}
+
+
+
+
+def validate_offline_lock(value, trust, apps):
+    """Reject unreviewed apps, unpinned revisions and trust-identity drift."""
+    if not isinstance(value, dict) or value.get('schema_version') != 1:
+        raise ValueError('unsupported offline lock schema')
+    if (value.get('architecture') != 'x86_64'
+            or value.get('origin') != 'flathub'
+            or value.get('collection_id') != trust['collection_id']
+            or value.get('definition_sha256') != trust['definition_sha256']
+            or value.get('signing_key_fingerprint') != trust['primary_fingerprint']
+            or value.get('languages') != ['ar', 'en']):
+        raise ValueError('offline lock source identity mismatch')
+    records = value.get('deployments')
+    if not isinstance(records, list) or len(records) != 12:
+        raise ValueError('offline lock must pin exactly 12 deployments')
+    pinned = {}
+    for row in records:
+        if not isinstance(row, dict) or set(row) != {'ref', 'commit'}:
+            raise ValueError('offline lock deployment record is malformed')
+        ref, commit = row['ref'], row['commit']
+        if (not isinstance(ref, str) or not REF_PATTERN.fullmatch(ref)
+                or not isinstance(commit, str)
+                or not re.fullmatch(r'[0-9a-f]{64}', commit)
+                or ref in pinned):
+            raise ValueError('duplicate or malformed pinned Flatpak ref/commit')
+        pinned[ref] = commit
+    if {ref for ref in pinned if ref.startswith('app/')} != set(apps['applications']):
+        raise ValueError('offline lock application catalog mismatch')
+    if {ref for ref in pinned if ref.startswith('runtime/')} != EXPECTED_RUNTIMES:
+        raise ValueError('offline lock runtime closure mismatch')
+    return pinned
+
+
+def load_offline_lock(path, trust, apps):
+    return validate_offline_lock(json.loads(regular_file(path)), trust, apps)
+
+
+def verify_pinned_deployments(client, trust, apps, pinned, filter_bytes):
+    check_remote(client, trust, filter_bytes)
+    report = snapshot(client, trust, apps, require_apps=True)
+    installed = {entry['ref']: entry['commit'] for entry in report['deployments']}
+    if installed != pinned:
+        missing = sorted(pinned.keys() - installed.keys())
+        extra = sorted(installed.keys() - pinned.keys())
+        wrong = sorted(ref for ref in pinned.keys() & installed.keys()
+                       if pinned[ref] != installed[ref])
+        raise ValueError(f'offline deployed refs/commits differ: '
+                         f'missing={missing}, extra={extra}, mismatched={wrong}')
+    return report
+
+
+def verify_network_isolation():
+    """Fail closed unless running inside an empty, separate network namespace.
+
+    /sys/class/net can show stale host interfaces in a chroot when sysfs was
+    mounted before the network namespace was created. Unlike that sysfs view,
+    /proc/self/ns/net and /proc/net/dev are task/network-namespace-aware.
+    """
+    own_netns = os.readlink('/proc/self/ns/net')
+    init_netns = os.readlink('/proc/1/ns/net')
+    if (not re.fullmatch(r'net:\[\d+\]', own_netns) or
+            not re.fullmatch(r'net:\[\d+\]', init_netns) or
+            own_netns == init_netns):
+        raise ValueError('offline import requires a separate network namespace')
+
+    lines = Path('/proc/net/dev').read_text().splitlines()
+    if len(lines) < 3 or not lines[0].lstrip().startswith('Inter-') or not lines[1].lstrip().startswith('face'):
+        raise ValueError('offline import cannot inspect network interfaces')
+    interfaces = set()
+    for line in lines[2:]:
+        if ':' not in line:
+            raise ValueError('offline import cannot parse network interfaces')
+        name = line.split(':', 1)[0].strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', name) or name in interfaces:
+            raise ValueError('offline import cannot parse network interfaces')
+        interfaces.add(name)
+    if interfaces != {'lo'}:
+        raise ValueError('offline import requires network namespace with loopback only')
+
+    # A new network namespace may expose a readable, zero-byte route table.
+    # Reject read failures, malformed nonempty data, and any actual route.
+    try:
+        route_text = Path('/proc/net/route').read_text()
+    except OSError as exc:
+        raise ValueError('offline import cannot inspect IPv4 routes') from exc
+    if route_text:
+        routes = route_text.splitlines()
+        if not routes or not routes[0].lstrip().startswith('Iface'):
+            raise ValueError('offline import cannot inspect IPv4 routes')
+        if any(line.strip() for line in routes[1:]):
+            raise ValueError('offline import requires an empty IPv4 routing table')
+
+
+def offline_install(client, assets, trust, apps, filter_bytes, repo):
+    """Only runs with network isolation plus fully pinned exported commits."""
+    verify_network_isolation()
+    if not repo.is_absolute() or repo.resolve() != repo or repo.is_symlink():
+        raise ValueError('offline repo must be an absolute non-symlink path')
+    if not (repo / 'objects').is_dir() or (repo / 'objects').is_symlink():
+        raise ValueError('offline OSTree repository is missing')
+    pinned = load_offline_lock(assets / 'offline-lock.json', trust, apps)
+    # Fail before any remote mutation if exported refs were substituted.
+    verify_offline_repo(repo, pinned, trust)
+    configure(client, assets, trust, filter_bytes)
+    client.run('install', '--assumeyes', '--noninteractive',
+               f'--sideload-repo={repo}', 'flathub',
+               *apps['applications'], timeout=3600)
+    # GL extensions are not necessarily selected by Flatpak in a chroot. Pin
+    # both explicitly, rather than allowing builder GPU discovery to decide.
+    client.run('install', '--assumeyes', '--noninteractive',
+               f'--sideload-repo={repo}', 'flathub',
+               'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08',
+               'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra',
+               timeout=3600)
+    verify_pinned_deployments(client, trust, apps, pinned, filter_bytes)
+    return pinned
+
+
+def verify_offline_repo(repo, pinned, trust):
+    output = subprocess.run(
+        ['ostree', f'--repo={repo}', 'refs', '--collections', '--revision'],
+        check=True, capture_output=True, text=True, env=safe_environment(),
+        timeout=120).stdout
+    entries = {}
+    for line in output.splitlines():
+        match = re.fullmatch(r'\(([^,]+), ([^)]+)\)\s+([0-9a-f]{64})',
+                             line.strip())
+        if not match:
+            raise ValueError('unrecognized offline OSTree ref listing')
+        collection, ref, commit = match.groups()
+        if collection != trust['collection_id'] or ref in entries:
+            raise ValueError('offline OSTree collection/ref drift')
+        entries[ref] = commit
+    # AppStream is metadata and may be refreshed during export; it is not an
+    # application/runtime deployment. No additional deployable refs allowed.
+    metadata = entries.pop('appstream2/x86_64', None)
+    if metadata is None or entries != pinned:
+        raise ValueError('offline repository does not match pinned commits')
+
+
+def write_json(destination, value):
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise ValueError('unsafe manifest destination')
+    content = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+    with tempfile.NamedTemporaryFile(mode='w', dir=destination.parent,
+                                     prefix='.edbp-manifest-', delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def prepare_stage(path):
+    if not path.is_absolute() or path.resolve() != path or path == Path('/'):
+        raise ValueError('stage must be an absolute path without symlink components')
+    if path == Path('/var/lib/flatpak') or Path('/var/lib/flatpak') in path.parents:
+        raise ValueError('refusing to use the host system installation as staging')
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.stat().st_uid != os.geteuid() or path.stat().st_mode & 0o077:
+        raise ValueError('stage must be owned by the operator and mode 0700')
+    marker = path / '.edbp-flatpak-stage'
+    if marker.exists() or marker.is_symlink():
+        if regular_file(marker).decode() != STAGE_MARKER:
+            raise ValueError('unrecognized staging marker')
+    elif any(path.iterdir()):
+        raise ValueError('refusing to adopt a nonempty unmarked staging directory')
+    else:
+        marker.write_text(STAGE_MARKER)
+    return path
+
+
+def require_target():
+    if os.geteuid() != 0:
+        raise ValueError('use password-required sudo for system management')
+    values = {}
+    for line in Path('/etc/os-release').read_text().splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            values[key] = value.strip('"')
+    if values.get('ID') != 'debian' or values.get('VERSION_ID') != '13':
+        raise ValueError('default system operations require Debian 13; use isolated acquisition')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--assets', type=Path, default=DEFAULT_ASSETS)
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('verify-sources')
+    sub.add_parser('configure')
+    verify = sub.add_parser('verify')
+    verify.add_argument('--require-apps', action='store_true')
+    verify.add_argument('--manifest-out', type=Path)
+    offline = sub.add_parser('offline-install')
+    offline.add_argument('--sideload-repo', type=Path, required=True)
+    acquire = sub.add_parser('acquire-online')
+    acquire.add_argument('--stage', type=Path, required=True)
+    args = parser.parse_args()
+    directory = args.assets.resolve()
+    trust, apps, filter_bytes = load_assets(directory)
+    if args.command == 'verify-sources':
+        print('PASS: application catalog, Flathub definition, public key, and filter')
+        return
+    stage = None
+    if args.command == 'acquire-online':
+        # A non-root --system client may delegate to the host's system helper,
+        # which has its own installation selection and environment.
+        if os.geteuid() != 0:
+            raise ValueError('isolated system acquisition requires password-required sudo')
+        stage = prepare_stage(args.stage)
+    else:
+        require_target()
+    client = Flatpak(safe_environment(stage))
+    if args.command in ('configure', 'acquire-online'):
+        configure(client, directory, trust, filter_bytes)
+    if args.command == 'acquire-online':
+        for ref in apps['applications']:
+            client.run('install', '--assumeyes', '--noninteractive',
+                       'flathub', ref, timeout=3600)
+        # GPU-dependent GL extensions must not depend on builder hardware.
+        # These reviewed branches are also installed explicitly in the image.
+        client.run('install', '--assumeyes', '--noninteractive',
+                   'flathub',
+                   'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08',
+                   'runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra',
+                   timeout=3600)
+        value = snapshot(client, trust, apps, require_apps=True)
+        write_json(stage / 'installed-manifest.json', value)
+        print(f'PASS: isolated online acquisition recorded in {stage / "installed-manifest.json"}')
+    elif args.command == 'offline-install':
+        offline_install(client, directory, trust, apps, filter_bytes,
+                        args.sideload_repo)
+        print('PASS: 12 offline refs installed and pinned commits verified')
+    elif args.command == 'verify':
+        check_remote(client, trust, filter_bytes)
+        value = snapshot(client, trust, apps, args.require_apps)
+        if args.manifest_out:
+            write_json(args.manifest_out, value)
+        print('PASS: inspected system trust and deployed refs; applications were not launched')
+    else:
+        print('PASS: system Flathub trust and acquisition filter configured')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, OSError, configparser.Error,
+            subprocess.SubprocessError) as error:
+        # Do not emit subprocess stdout/stderr or environment contents.
+        print(f'ERROR: {error}', file=sys.stderr)
+        sys.exit(1)

@@ -12,6 +12,9 @@ hplip_autostart=/etc/xdg/autostart/hplip-systray.desktop
 chown root:root \
     "${sudoers_file}" \
     "${oobe_script}" \
+    /etc/systemd/system/edbp-flatseal-provision.service \
+    /etc/systemd/system/edbp-oobe.service.d/20-flatseal-provision.conf \
+    /etc/systemd/system/sddm.service.d/20-flatseal-provision.conf \
     /etc/systemd/system/edbp-oobe.service \
     /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
     /etc/sddm.conf.d/hide-admin.conf \
@@ -31,6 +34,9 @@ chown root:root \
 chmod 0440 "${sudoers_file}"
 chmod 0755 "${oobe_script}"
 chmod 0644 \
+    /etc/systemd/system/edbp-flatseal-provision.service \
+    /etc/systemd/system/edbp-oobe.service.d/20-flatseal-provision.conf \
+    /etc/systemd/system/sddm.service.d/20-flatseal-provision.conf \
     /etc/systemd/system/edbp-oobe.service \
     /etc/systemd/system/sddm.service.d/10-edbp-oobe.conf \
     /etc/sddm.conf.d/hide-admin.conf \
@@ -51,7 +57,7 @@ chmod 0644 \
 bash -n "${oobe_script}"
 # Keep structural/dependency verification while intentionally skipping
 # Documentation=man: lookups.  The production image omits man-db/manpages.
-systemd-analyze verify --man=no edbp-oobe.service sddm.service
+systemd-analyze verify --man=no --recursive-errors=one edbp-flatseal-provision.service edbp-oobe.service sddm.service
 grep -Fqx "Indexing-Enabled[\$i]=false" /etc/xdg/baloofilerc \
     || { printf '%s\n' 'ERROR: Baloo indexing policy is missing' >&2; exit 1; }
 

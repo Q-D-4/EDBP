@@ -17,6 +17,17 @@ for directory in \
     fi
 done
 
+# Remove verified Flatpak build inputs before generating the final image.
+stage_root=/opt/edbp-build-inputs
+
+if [ -e "$stage_root" ] || [ -L "$stage_root" ]; then
+    if [ -L "$stage_root" ] || [ ! -d "$stage_root" ]; then
+        echo 'ERROR: unsafe Flatpak staging path' >&2
+        exit 1
+    fi
+    rm -rf -- "$stage_root"
+fi
+
 find /var/log -type f -exec truncate --size 0 {} +
 rm -f -- /root/.bash_history
 

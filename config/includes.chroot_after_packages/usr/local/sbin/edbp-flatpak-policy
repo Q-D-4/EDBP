@@ -1,0 +1,147 @@
+#!/usr/bin/python3
+"""EDBP Phase 4: conservative system ONLYOFFICE Flatpak override candidate.
+
+No network access and no broad host filesystem grant (but direct access
+to Documents and Desktop). No PulseAudio or GVfs D-Bus exception.
+Keep X11/DRI until on-device KDE acceptance. This is an overridable
+default, NOT a mandatory policy for unrestricted local users.
+"""
+
+import configparser
+import os
+import subprocess
+import sys
+
+APP = "org.onlyoffice.desktopeditors"
+FLATPAK = "/usr/bin/flatpak"
+REQUIRED = {
+    "Context": {
+        "shared": ("!network",),
+        "filesystems": ("!host", "xdg-desktop", "xdg-documents"),
+        "sockets": ("!pulseaudio",),
+    },
+    "Session Bus Policy": {"org.gtk.vfs.*": "none"},
+}
+OPTIONS = (
+    "--unshare=network",
+    "--nofilesystem=host",
+    "--filesystem=xdg-documents",
+    "--filesystem=xdg-desktop",
+    "--nosocket=pulseaudio",
+    "--no-talk-name=org.gtk.vfs.*",
+)
+
+
+class PolicyError(Exception):
+    pass
+
+
+def flatpak(*args):
+    result = subprocess.run((FLATPAK, *args), capture_output=True, text=True,
+                            check=False)
+    if result.returncode:
+        raise PolicyError(f"Flatpak command failed (rc={result.returncode}): "
+                          + " ".join(args) + ": " + result.stderr.strip())
+    return result.stdout
+
+
+def parse_override(text):
+    if not text.strip():
+        return {}
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        raise PolicyError(f"Cannot parse system override: {exc}") from exc
+    return {section: dict(parser.items(section)) for section in parser.sections()}
+
+
+def is_baseline(text):
+    actual = parse_override(text)
+    if set(actual) != set(REQUIRED):
+        return False
+    for section, entries in REQUIRED.items():
+        if set(actual[section]) != set(entries):
+            return False
+        for name, expected in entries.items():
+            value = actual[section][name]
+            if isinstance(expected, tuple):
+                if tuple(sorted(x for x in value.split(";") if x)) != expected:
+                    return False
+            elif value != expected:
+                return False
+    return True
+
+
+def show():
+    return flatpak("override", "--system", "--show", APP)
+
+
+def apply():
+    flatpak("info", "--system", APP)  # require an already-deployed app
+    old = show()
+    if old.strip():
+        if not is_baseline(old):
+            raise PolicyError("Existing ONLYOFFICE system override differs; "
+                              "refusing to overwrite local policy")
+        print("PASS: ONLYOFFICE system baseline already installed")
+        return
+    flatpak("override", "--system", *OPTIONS, APP)
+    if not is_baseline(show()):
+        raise PolicyError("Generated Flatpak override differs from approved "
+                          "baseline; stop ISO build")
+    print("PASS: ONLYOFFICE system baseline applied and verified")
+
+
+def verify():
+    if not is_baseline(show()):
+        raise PolicyError("ONLYOFFICE system override is missing or drifted")
+    print("PASS: ONLYOFFICE system override matches Phase 4 baseline")
+
+
+def rollback():
+    current = show()
+    if not current.strip():
+        print("PASS: ONLYOFFICE override already absent")
+        return
+    if not is_baseline(current):
+        raise PolicyError("Override changed: refusing to erase someone else's policy")
+    flatpak("override", "--system", "--reset", APP)
+    if show().strip():
+        raise PolicyError("System override still present after reset")
+    print("PASS: ONLYOFFICE baseline removed")
+
+
+def audit_user():
+    differences = []
+    for args in (("override", "--user", "--show", APP),
+                 ("override", "--user", "--show")):
+        if flatpak(*args).strip():
+            differences.append(" ".join(args))
+    if differences:
+        raise PolicyError("Potential user override conflict: "
+                          + "; ".join(differences))
+    print("PASS: No user-scoped Flatpak overrides visible for this account")
+
+
+def main(argv):
+    if len(argv) != 2 or argv[1] not in ("apply", "verify", "rollback", "audit-user"):
+        print("Usage: edbp-flatpak-policy {apply|verify|rollback|audit-user}",
+              file=sys.stderr)
+        return 2
+    action = argv[1]
+    if action in ("apply", "rollback") and os.geteuid() != 0:
+        print("ERROR: system override changes require root", file=sys.stderr)
+        return 2
+    try:
+        {"apply": apply, "verify": verify, "rollback": rollback,
+         "audit-user": audit_user}[action]()
+    except PolicyError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
