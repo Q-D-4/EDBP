@@ -72,6 +72,7 @@ path = [
   "config/archives/element-io.key",
   "config/includes.chroot_after_packages/usr/share/keyrings/brave-browser-archive-keyring.gpg",
   "config/includes.chroot_after_packages/usr/share/keyrings/element-io-archive-keyring.gpg",
+  "config/includes.chroot_after_packages/usr/share/edbp/flatpak/flathub.flatpakrepo",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "NONE"

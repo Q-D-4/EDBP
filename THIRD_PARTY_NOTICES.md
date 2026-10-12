@@ -113,6 +113,24 @@ Official vendor repository/download information: https://element.io/en/download
 
 These files are **not covered by the default EDBP GPL grant**. The Element name and related marks remain the property of their respective owners.
 
+## Flathub remote definition and signing material
+
+`config/includes.chroot_after_packages/usr/share/edbp/flatpak/flathub.flatpakrepo`
+is the official technical remote definition, including its vendor public key,
+retrieved unchanged from https://dl.flathub.org/repo/flathub.flatpakrepo on
+2026-10-08. Its SHA-256 is
+`3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a`.
+The primary signing-key fingerprint is
+`6E5C05D979C76DAF93C081354184DD4D907A7CAE`.
+The definition and key are not claimed as EDBP-original copyright or relicensed
+under GPL. See the public-key annotation in `REUSE.toml` and `trust.json` for
+the source and integrity metadata. Key rotation requires an explicit review.
+
+Flatpak command names and Polkit action IDs were used as interface references
+from the upstream Flatpak 1.16.1 command documentation and
+`system-helper/org.freedesktop.Flatpak.policy.in`; no implementation code or
+policy definitions were copied from those files.
+
 ## Generated ISO contents
 
 EDBP builds and distributes a Debian-based ISO containing software from Debian and third-party repositories. Every packaged component retains its own copyright and license. The EDBP license applies only to EDBP-covered source/configuration and does not relicense Debian, KDE, Brave, Element, USBGuard, BusyBox, systemd, OpenSSH, LibreOffice, or other packaged software.
