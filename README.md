@@ -6,6 +6,8 @@ An institution-neutral Debian workstation image built with `live-build`. EDBP co
 
 **Debian 13 (Trixie)** · **amd64** · **UEFI** · **KDE Plasma 6** · **GPLv3**
 
+**Source version:** `2.3.0` — *release candidate in preparation*. This is not a published GitHub Release, signed tag, distributable ISO or approved Golden Master. The v2.2.0 specification remains the documented normative baseline pending an explicitly reviewed revision.
+
 > [!IMPORTANT]
 > **Engineering project, not a universal ready-to-deploy ISO.** Building an image and completing a hardware pilot do not constitute production approval. Review the [release acceptance requirements](EDBP-v2.2.0-SPECIFICATION.md) and adapt site-specific policies downstream before deployment.
 
@@ -102,7 +104,7 @@ Follow the [full installation procedure](docs/BUILDING.ar.md), not this overview
 
 ## Verification and release status
 
-The Phase 2 candidate has passed a **single physical-workstation pilot** covering:
+The following **documented v2.2.0 Phase 2** pilot covered one physical workstation. A separate clean v2.2.0 source build and subsequent hardware run were also reported, but are not substitutes for formal v2.3.0 release acceptance. The documented pilot covered:
 
 - UEFI image structure and ISO SHA-256 integrity.
 - Debian 13 installation, initial startup and a subsequent reboot.
@@ -112,7 +114,7 @@ The Phase 2 candidate has passed a **single physical-workstation pilot** coverin
 
 **This is not a Golden Master certification.** The [specification](EDBP-v2.2.0-SPECIFICATION.md) requires additional independent installation, security, hardware-inventory and operational sign-off gates. A test ISO containing laboratory credentials is **not a distributable production artifact**.
 
-Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md) and [Phase 2 release notes](RELEASE_NOTES_PHASE2.md) for the precise observed scope and outstanding checks.
+Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md), [Phase 2 release notes](RELEASE_NOTES_PHASE2.md), and [v2.3.0 candidate notes](RELEASE_NOTES_2.3.0.md) for the exact evidence boundaries and remaining gates.
 
 ## Repository map
 
@@ -125,7 +127,8 @@ Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md) and [Phase
 | `FLATPAK_PHASE2.md` | Flatpak implementation checkpoint and evidence |
 | `docs/BUILDING.ar.md` | Detailed Arabic build, installation and maintenance guide |
 | `docs/PHASE2_RUNTIME_ACCEPTANCE.md` | Physical-device acceptance observations |
-| `RELEASE_NOTES_PHASE2.md` | Changes in the Phase 2 candidate and known boundaries |
+| `RELEASE_NOTES_PHASE2.md` | Historical Phase 2 pilot notes and limitations |
+| `RELEASE_NOTES_2.3.0.md` | New version candidate scope and uncompleted release gates |
 | `LICENSE`, `LICENSES/` | Project and third-party license materials |
 
 ## Documentation
@@ -134,7 +137,8 @@ Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md) and [Phase
 - **[Technical specification](EDBP-v2.2.0-SPECIFICATION.md)**: normative architecture, security posture and Golden Master criteria.
 - **[Flatpak Phase 2](FLATPAK_PHASE2.md)**: design and verification checkpoint.
 - **[Physical-device acceptance](docs/PHASE2_RUNTIME_ACCEPTANCE.md)**: what was actually observed, and what remains unverified.
-- **[Release notes](RELEASE_NOTES_PHASE2.md)**: user-visible improvements and constraints.
+- **[Phase 2 pilot notes](RELEASE_NOTES_PHASE2.md)**: historical improvements and constraints.
+- **[v2.3.0 candidate notes](RELEASE_NOTES_2.3.0.md)**: version transition and release gates.
 
 ## Contributions and responsible disclosure
 
