@@ -59,6 +59,7 @@ sh -n config/includes.installer/edbp-late-command
 sh -n config/includes.installer/edbp-partman-policy
 sh -n config/includes.installer/usr/lib/finish-install.d/94z-edbp-enable-normal-reboot
 sh -n config/includes.installer/usr/lib/apt-setup/generators/39edbp-apt-media-policy
+bash -n tests/test-brave-policy-path
 bash -n tests/test-bash-session-history-policy
 bash -n tests/test-finish-install-reboot
 bash -n tests/test-in-target-stdout-policy
@@ -107,6 +108,7 @@ shellcheck -x --severity=style \
     scripts/stage-admin-keys \
     scripts/stage-edbpadmin-password \
     scripts/verify-tree \
+    tests/test-brave-policy-path \
     tests/test-bash-session-history-policy \
     tests/test-finish-install-reboot \
     tests/test-in-target-stdout-policy \
@@ -313,6 +315,7 @@ if grep -Fq '/target' "${apt_media_policy_generator}"; then
 fi
 PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test_flatseal_firstboot.py
 ./tests/test-in-target-stdout-policy
+./tests/test-brave-policy-path
 ./tests/test-bash-session-history-policy
 ./tests/test-oobe-hostname-policy
 ./tests/test-oobe-username-policy

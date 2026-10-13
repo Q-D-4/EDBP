@@ -136,6 +136,16 @@ for (component, nodes, prop), expected in expected_locked_values.items():
         raise SystemExit(f'Unexpected LibreOffice policy value: {prop}')
 PY
 
+# Chromium's managed-policy lookup uses /etc/brave/policies, while EDBP
+# retains its reviewed Brave Origin policy under /etc/brave-origin/policies.
+# The image include must provide this exact relative symlink; fail closed.
+if [ ! -L /etc/brave/policies ] || \
+   [ "$(readlink /etc/brave/policies)" != '../brave-origin/policies' ] || \
+   [ ! -f /etc/brave/policies/managed/policies.json ]; then
+    printf '%s\n' 'ERROR: Brave managed policy compatibility path missing or unsafe' >&2
+    exit 1
+fi
+
 # Debian scans /usr/lib/libreoffice/share/registry, while /etc is the correct
 # administrator-owned location. Refuse to overwrite an unexpected object.
 if [ -L "${lo_registry_link}" ]; then

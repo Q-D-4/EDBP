@@ -6,7 +6,7 @@ An institution-neutral Debian workstation image built with `live-build`. EDBP co
 
 **Debian 13 (Trixie)** · **amd64** · **UEFI** · **KDE Plasma 6** · **GPLv3**
 
-**Source version:** `2.3.0` — *release candidate in preparation*. This is not a published GitHub Release, signed tag, distributable ISO or approved Golden Master. The v2.2.0 specification remains the documented normative baseline pending an explicitly reviewed revision.
+**Source version:** `2.3.1` — *Brave managed-policy path hotfix candidate*. The documented v2.3.0 pilot does not validate a v2.3.1 ISO. This is not a published GitHub Release, signed tag, distributable ISO or approved Golden Master. The v2.2.0 specification remains the documented normative baseline pending an explicitly reviewed revision.
 
 > [!IMPORTANT]
 > **Engineering project, not a universal ready-to-deploy ISO.** Building an image and completing a hardware pilot do not constitute production approval. Review the [release acceptance requirements](EDBP-v2.2.0-SPECIFICATION.md) and adapt site-specific policies downstream before deployment.
@@ -114,7 +114,7 @@ The following **documented v2.2.0 Phase 2** pilot covered one physical workstati
 
 **This is not a Golden Master certification.** The [specification](EDBP-v2.2.0-SPECIFICATION.md) requires additional independent installation, security, hardware-inventory and operational sign-off gates. A test ISO containing laboratory credentials is **not a distributable production artifact**.
 
-Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md), [Phase 2 release notes](RELEASE_NOTES_PHASE2.md), and [v2.3.0 candidate notes](RELEASE_NOTES_2.3.0.md) for the exact evidence boundaries and remaining gates.
+Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md), [Phase 2 release notes](RELEASE_NOTES_PHASE2.md), [v2.3.0 candidate notes](RELEASE_NOTES_2.3.0.md), and [v2.3.1 hotfix notes](RELEASE_NOTES_2.3.1.md) for the exact evidence boundaries and remaining gates.
 
 ## Repository map
 
@@ -128,7 +128,8 @@ Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md), [Phase 2 
 | `docs/BUILDING.ar.md` | Detailed Arabic build, installation and maintenance guide |
 | `docs/PHASE2_RUNTIME_ACCEPTANCE.md` | Physical-device acceptance observations |
 | `RELEASE_NOTES_PHASE2.md` | Historical Phase 2 pilot notes and limitations |
-| `RELEASE_NOTES_2.3.0.md` | New version candidate scope and uncompleted release gates |
+| `RELEASE_NOTES_2.3.0.md` | v2.3.0 candidate scope and uncompleted release gates |
+| `RELEASE_NOTES_2.3.1.md` | Brave policy path hotfix scope and validation status |
 | `LICENSE`, `LICENSES/` | Project and third-party license materials |
 
 ## Documentation
@@ -139,6 +140,7 @@ Read [Phase 2 acceptance evidence](docs/PHASE2_RUNTIME_ACCEPTANCE.md), [Phase 2 
 - **[Physical-device acceptance](docs/PHASE2_RUNTIME_ACCEPTANCE.md)**: what was actually observed, and what remains unverified.
 - **[Phase 2 pilot notes](RELEASE_NOTES_PHASE2.md)**: historical improvements and constraints.
 - **[v2.3.0 candidate notes](RELEASE_NOTES_2.3.0.md)**: version transition and release gates.
+- **[v2.3.1 hotfix notes](RELEASE_NOTES_2.3.1.md)**: Brave policy path correction and pending validation.
 
 ## Contributions and responsible disclosure
 
