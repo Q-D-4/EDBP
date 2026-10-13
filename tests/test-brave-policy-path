@@ -1,0 +1,43 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$project_root"
+
+fail() {
+    printf 'ERROR: Brave managed-policy path regression: %s\n' "$1" >&2
+    exit 1
+}
+
+include_root=config/includes.chroot_after_packages/etc
+policy_link="$include_root/brave/policies"
+policy_file="$include_root/brave-origin/policies/managed/policies.json"
+
+[[ -L "$policy_link" ]] || fail 'Chromium-compatible policies link is absent'
+[[ "$(readlink -- "$policy_link")" == '../brave-origin/policies' ]] \
+    || fail 'Chromium-compatible policies link points outside approved policy tree'
+[[ -f "$policy_link/managed/policies.json" ]] \
+    || fail 'Chromium-compatible path cannot resolve the approved JSON file'
+cmp -s -- "$policy_file" "$policy_link/managed/policies.json" \
+    || fail 'Chromium path does not resolve the original policy content'
+
+# Simulate a symlink-preserving image include copy in a temporary directory.
+fixture=$(mktemp -d)
+trap 'rm -rf -- "$fixture"' EXIT
+mkdir -p -- "$fixture/etc/brave" "$fixture/etc/brave-origin"
+cp -a -- "$include_root/brave-origin/policies" "$fixture/etc/brave-origin/policies"
+cp -a -- "$policy_link" "$fixture/etc/brave/policies"
+[[ -L "$fixture/etc/brave/policies" ]] || fail 'image copy lost policy symlink'
+[[ "$(readlink -- "$fixture/etc/brave/policies")" == '../brave-origin/policies' ]] \
+    || fail 'image copy changed policy target'
+cmp -s -- "$policy_file" "$fixture/etc/brave/policies/managed/policies.json" \
+    || fail 'policy JSON not visible through simulated image layout'
+
+# The build hook must fail closed if the compatibility link is absent.
+hook=config/hooks/live/040-configure-desktop-identity.hook.chroot
+grep -Fq '[ ! -L /etc/brave/policies ]' "$hook" \
+    || fail 'build hook does not require the managed-policy symlink'
+grep -Fq '../brave-origin/policies' "$hook" \
+    || fail 'build hook does not pin the symlink target'
+
+printf '%s\n' 'Brave managed-policy path regression passed.'
