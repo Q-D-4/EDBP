@@ -78,6 +78,20 @@ prepare-flatpak-build: verify
 	else \
 		sudo -- ./scripts/prepare-flatpak-build; \
 	fi
+	@# Publish only the validated, non-secret lock metadata *before* the long build.
+	@# The staged input's parent is root-private (0700). No chmod/chown of it.
+	@lock_tmp="$$(mktemp "$(FLATPAK_LOCK).tmp.XXXXXX")"; \
+	trap 'rm -f -- "$$lock_tmp"' EXIT; \
+	if (( EUID == 0 )); then \
+		cat -- "$(FLATPAK_BUILD_LOCK)" > "$$lock_tmp"; \
+	else \
+		sudo -- cat -- "$(FLATPAK_BUILD_LOCK)" > "$$lock_tmp"; \
+	fi; \
+	test -s "$$lock_tmp"; \
+	jq --exit-status '(.schema_version == 1) and (.architecture == "x86_64") and (.origin == "flathub") and ((.deployments | type) == "array") and ((.deployments | length) == 12)' "$$lock_tmp" >/dev/null; \
+	chmod 0644 "$$lock_tmp"; \
+	mv -f -- "$$lock_tmp" "$(FLATPAK_LOCK)"; \
+	trap - EXIT
 
 # Stage both inputs as one transaction. A failure in either step removes both
 # generated files so that no stale credential is consumed by a later build.
@@ -145,8 +159,7 @@ build: config
 
 checksums: build
 	@test -s "$(BUILD_INPUTS)"
-	@test -s "$(FLATPAK_BUILD_LOCK)"
-	@install -m 0644 "$(FLATPAK_BUILD_LOCK)" "$(FLATPAK_LOCK)"
+	@test -s "$(FLATPAK_LOCK)"
 	@sha256sum "$(ISO)" "$(PACKAGES)" "$(BUILD_INPUTS)" "$(FLATPAK_LOCK)" > SHA256SUMS
 	@iso_sha="$$(sha256sum "$(ISO)" | awk '{print $$1}')"; \
 	packages_sha="$$(sha256sum "$(PACKAGES)" | awk '{print $$1}')"; \
